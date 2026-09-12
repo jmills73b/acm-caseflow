@@ -13,6 +13,7 @@ interface LetterRow {
   client_id: number;
   client_name: string;
   letter_type: string | null;
+  format: string;
   personal_fields: string;
   draft_body: string;
   review_flags: string | null;
@@ -26,12 +27,20 @@ interface ReviewFlag {
   text: string;
 }
 
+const LETTER_FORMATS = ["letter", "email"] as const;
+type LetterFormat = (typeof LETTER_FORMATS)[number];
+
+function isValidFormat(value: unknown): value is LetterFormat {
+  return typeof value === "string" && (LETTER_FORMATS as readonly string[]).includes(value);
+}
+
 function toLetter(row: LetterRow) {
   return {
     id: row.id,
     clientId: row.client_id,
     clientName: row.client_name,
     letterType: row.letter_type,
+    format: row.format,
     personalFields: JSON.parse(row.personal_fields) as string[],
     draftBody: row.draft_body,
     reviewFlags: row.review_flags ? (JSON.parse(row.review_flags) as ReviewFlag[]) : null,
@@ -42,7 +51,7 @@ function toLetter(row: LetterRow) {
 }
 
 const LIST_COLUMNS =
-  "letters.id, letters.client_id, clients.name AS client_name, letters.letter_type, " +
+  "letters.id, letters.client_id, clients.name AS client_name, letters.letter_type, letters.format, " +
   "letters.personal_fields, letters.draft_body, letters.review_flags, " +
   "letters.pii_scan_clean, users.email AS created_by_email, letters.created_at";
 
@@ -143,6 +152,7 @@ letters.get("/usage", async (c) => {
 
 interface ChatRequest {
   letterType?: string;
+  format?: string;
   personalFields?: string[];
   messages?: ChatMessage[];
 }
@@ -188,17 +198,24 @@ letters.post("/chat", async (c) => {
   if (!letterType) {
     return c.json({ error: "letterType is required" }, 400);
   }
+  if (body.format !== undefined && !isValidFormat(body.format)) {
+    return c.json({ error: `format must be one of: ${LETTER_FORMATS.join(", ")}` }, 400);
+  }
   if (!isValidMessages(body.messages)) {
     return c.json({ error: "messages must be a non-empty list ending with a user message" }, 400);
   }
 
+  const format: LetterFormat = isValidFormat(body.format) ? body.format : "letter";
   const { model } = await getAccountAiSettings(c.env.DB);
   const personalFields = Array.isArray(body.personalFields) ? body.personalFields : [];
   const tokens = personalFields.map((field) => `{{${field}}}`);
 
   const system = [
-    "You are drafting a piece of business correspondence for a UK family-law costs consultancy, through a " +
-      "back-and-forth conversation with the person you're drafting it for.",
+    format === "email"
+      ? "You are drafting an email for a UK family-law costs consultancy, through a back-and-forth conversation " +
+        "with the person you're drafting it for."
+      : "You are drafting a piece of business correspondence for a UK family-law costs consultancy, through a " +
+        "back-and-forth conversation with the person you're drafting it for.",
     `The letter's purpose, as described by the user: ${letterType}`,
     "You must use ONLY the following literal placeholder tokens for any personal or identifying information " +
       "(a name, address, or similar) -- never invent, guess, or fill in a real value of your own, even if it " +
@@ -206,8 +223,12 @@ letters.post("/chat", async (c) => {
     tokens.length > 0 ? tokens.join(", ") : "(no personal-data tokens were made available for this letter)",
     "If you need more information before producing a useful draft, ask a single concise clarifying question and " +
       "do not include a draft in that reply.",
-    "Otherwise, respond with ONLY the full letter body, incorporating everything discussed so far -- no preamble " +
-      "like 'Here's a draft', no commentary, no markdown formatting.",
+    format === "email"
+      ? "Otherwise, respond with ONLY the full email, incorporating everything discussed so far -- start with a " +
+        "single line 'Subject: ...' summarising it, then a blank line, then the email body with a concise " +
+        "greeting and sign-off (no postal address block, no markdown formatting, no preamble like 'Here's a draft')."
+      : "Otherwise, respond with ONLY the full letter body, incorporating everything discussed so far -- no " +
+        "preamble like 'Here's a draft', no commentary, no markdown formatting.",
   ].join("\n\n");
 
   try {
@@ -281,6 +302,7 @@ letters.post("/review", async (c) => {
 interface SaveRequest {
   clientId?: number;
   letterType?: string | null;
+  format?: string;
   personalFields?: string[];
   draftBody?: string;
   reviewFlags?: ReviewFlag[] | null;
@@ -297,6 +319,9 @@ letters.post("/", async (c) => {
   if (!body.draftBody?.trim()) {
     return c.json({ error: "draftBody is required" }, 400);
   }
+  if (body.format !== undefined && !isValidFormat(body.format)) {
+    return c.json({ error: `format must be one of: ${LETTER_FORMATS.join(", ")}` }, 400);
+  }
 
   const client = await c.env.DB.prepare("SELECT id FROM clients WHERE id = ?").bind(body.clientId).first();
   if (!client) {
@@ -304,13 +329,14 @@ letters.post("/", async (c) => {
   }
 
   const created = await c.env.DB.prepare(
-    `INSERT INTO letters (client_id, letter_type, personal_fields, draft_body, review_flags, pii_scan_clean, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO letters (client_id, letter_type, format, personal_fields, draft_body, review_flags, pii_scan_clean, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      RETURNING id`,
   )
     .bind(
       body.clientId,
       body.letterType ?? null,
+      isValidFormat(body.format) ? body.format : "letter",
       JSON.stringify(body.personalFields ?? []),
       body.draftBody,
       body.reviewFlags ? JSON.stringify(body.reviewFlags) : null,
