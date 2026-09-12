@@ -1,50 +1,62 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Icon } from "./icons";
 import {
   addLetter,
+  chatDraftLetter,
   deleteLetter,
-  draftLetter,
   getClients,
-  getLetterCategories,
   getLetters,
   reviewLetter,
+  type ChatMessage,
   type Client,
   type Letter,
-  type LetterCategory,
   type ReviewLetterResult,
 } from "./api";
-
-const TONE_OPTIONS = ["Firm", "Reassuring", "Neutral", "Friendly"];
 
 // A fixed small set rather than a per-letter-type field schema -- keeps
 // the app from ever needing a form-builder for this. Every one of these
 // only ever reaches the drafting agent as a token name (e.g.
-// "CLIENT_NAME"), never the real value -- see draftLetter's doc comment
-// in api.ts and ARCHITECTURE.md's Correspondence section.
+// "CLIENT_NAME"), never the real value -- see chatDraftLetter's doc
+// comment in api.ts and ARCHITECTURE.md's Correspondence section. This is
+// the one piece of setup that stays structured even though everything
+// else (letter type, facts, tone) now flows through the conversation --
+// it's the safety mechanism, not a fact to discuss.
 const PERSONAL_FIELD_OPTIONS: Array<{ token: string; label: string }> = [
   { token: "CLIENT_NAME", label: "Client name" },
   { token: "CLIENT_ADDRESS", label: "Postal address" },
   { token: "YOUR_NAME", label: "Your sign-off name" },
 ];
 
+// Renders {{TOKEN}} placeholders as visually distinct badges wherever
+// they appear in a message, so a token reads as "not a real value yet"
+// the same way it does in the setup checklist above.
+function renderWithTokens(text: string) {
+  const parts = text.split(/(\{\{[A-Z0-9_]+\}\})/g);
+  return parts.map((part, i) =>
+    /^\{\{[A-Z0-9_]+\}\}$/.test(part) ? (
+      <span className="token" key={i}>
+        {part}
+      </span>
+    ) : (
+      <span key={i}>{part}</span>
+    ),
+  );
+}
+
 export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
   const [clients, setClients] = useState<Client[]>([]);
-  const [categories, setCategories] = useState<LetterCategory[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [clientId, setClientId] = useState<number | "">("");
-  const [categoryId, setCategoryId] = useState<number | "">("");
-  const [amount, setAmount] = useState("");
-  const [reference, setReference] = useState("");
-  const [keyDate, setKeyDate] = useState("");
-  const [tone, setTone] = useState<string>(TONE_OPTIONS[0] ?? "Firm");
+  const [letterType, setLetterType] = useState("");
   const [personalFields, setPersonalFields] = useState<string[]>(PERSONAL_FIELD_OPTIONS.map((f) => f.token));
-  const [bespokeRequest, setBespokeRequest] = useState("");
 
-  const [draftBody, setDraftBody] = useState<string | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [sending, setSending] = useState(false);
+
   const [review, setReview] = useState<ReviewLetterResult | null>(null);
-  const [generating, setGenerating] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -54,11 +66,8 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
   const [historyLoading, setHistoryLoading] = useState(false);
 
   useEffect(() => {
-    Promise.all([getClients(), getLetterCategories()])
-      .then(([clientRows, categoryRows]) => {
-        setClients(clientRows);
-        setCategories(categoryRows);
-      })
+    getClients()
+      .then(setClients)
       .catch((err) => setLoadError(err instanceof Error ? err.message : "Couldn't load Correspondence"))
       .finally(() => setLoading(false));
   }, []);
@@ -75,51 +84,74 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
       .finally(() => setHistoryLoading(false));
   }, [clientId]);
 
+  const lastAssistantMessage = [...messages].reverse().find((m) => m.role === "assistant") ?? null;
+
   function togglePersonalField(token: string) {
     setPersonalFields((prev) => (prev.includes(token) ? prev.filter((f) => f !== token) : [...prev, token]));
   }
 
-  function resetDraft() {
-    setDraftBody(null);
+  function startOver() {
+    setMessages([]);
+    setChatInput("");
     setReview(null);
     setSaved(false);
+    setError(null);
   }
 
-  async function handleGenerate() {
+  async function handleStart() {
     if (clientId === "") {
       setError("Choose a client first");
       return;
     }
+    if (!letterType.trim()) {
+      setError("Describe the kind of letter you need");
+      return;
+    }
 
     setError(null);
-    setSaved(false);
-    setGenerating(true);
+    const kickoff: ChatMessage = { role: "user", content: `I need to write: ${letterType.trim()}` };
+    setSending(true);
     try {
-      const result = await draftLetter({
-        clientId,
-        letterCategoryId: categoryId === "" ? null : categoryId,
-        amount: amount ? Number(amount) : null,
-        reference: reference || null,
-        keyDate: keyDate || null,
-        tone,
-        personalFields,
-        bespokeRequest: bespokeRequest || null,
-      });
-      setDraftBody(result.draftBody);
-      setReview(null);
+      const result = await chatDraftLetter({ letterType: letterType.trim(), personalFields, messages: [kickoff] });
+      setMessages([kickoff, { role: "assistant", content: result.reply }]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't draft the letter");
+      setError(err instanceof Error ? err.message : "Couldn't reach the drafting agent");
     } finally {
-      setGenerating(false);
+      setSending(false);
+    }
+  }
+
+  async function handleSend(event: FormEvent) {
+    event.preventDefault();
+    const text = chatInput.trim();
+    if (!text) return;
+
+    const userMessage: ChatMessage = { role: "user", content: text };
+    const nextMessages = [...messages, userMessage];
+    setMessages(nextMessages);
+    setChatInput("");
+    setError(null);
+    setSending(true);
+    try {
+      const result = await chatDraftLetter({ letterType: letterType.trim(), personalFields, messages: nextMessages });
+      setMessages([...nextMessages, { role: "assistant", content: result.reply }]);
+      setReview(null);
+      setSaved(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't reach the drafting agent");
+      setMessages(messages);
+      setChatInput(text);
+    } finally {
+      setSending(false);
     }
   }
 
   async function handleReview() {
-    if (!draftBody) return;
+    if (!lastAssistantMessage) return;
     setError(null);
     setReviewing(true);
     try {
-      setReview(await reviewLetter(draftBody));
+      setReview(await reviewLetter(lastAssistantMessage.content));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't review the letter");
     } finally {
@@ -128,25 +160,21 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
   }
 
   async function handleSave() {
-    if (clientId === "" || !draftBody) return;
+    if (clientId === "" || !lastAssistantMessage) return;
     setError(null);
     setSaving(true);
     try {
       await addLetter({
         clientId,
-        letterCategoryId: categoryId === "" ? null : categoryId,
-        amount: amount ? Number(amount) : null,
-        reference: reference || null,
-        keyDate: keyDate || null,
-        tone,
+        letterType: letterType.trim(),
         personalFields,
-        bespokeRequest: bespokeRequest || null,
-        draftBody,
+        draftBody: lastAssistantMessage.content,
         reviewFlags: review?.flags ?? null,
         piiScanClean: review?.piiScanClean ?? null,
       });
       setSaved(true);
-      resetDraft();
+      startOver();
+      setLetterType("");
       setHistory(await getLetters(clientId));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't save the letter");
@@ -168,6 +196,8 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
 
   if (loading) return <p className="loading">Loading…</p>;
 
+  const inConversation = messages.length > 0;
+
   return (
     <>
       <button type="button" className="back-link" onClick={onBack}>
@@ -175,8 +205,9 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
       </button>
       <h1>Correspondence</h1>
       <p className="hint">
-        Drafts a letter, then reviews it for compliance and personal data before you send anything. Personal details
-        are never sent to the AI — the letter always uses placeholders, filled in afterward outside the system.
+        Draft a letter through a conversation with the drafting agent, then send it for a compliance and
+        personal-data review before you use it. Personal details are never sent to the AI — the letter always uses
+        placeholders, filled in afterward outside the system.
       </p>
 
       {loadError && (
@@ -187,16 +218,14 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
 
       <p className="settings-section-title">1. Who this is for, and what kind of letter</p>
       <div className="edit-panel">
-        <div className="edit-row" style={{ marginBottom: 18 }}>
+        <div className="edit-row" style={{ marginBottom: 16 }}>
           <label className="edit-field">
             <span>Client</span>
             <select
               className="input-compact"
               value={clientId}
-              onChange={(event) => {
-                setClientId(event.target.value ? Number(event.target.value) : "");
-                resetDraft();
-              }}
+              disabled={inConversation}
+              onChange={(event) => setClientId(event.target.value ? Number(event.target.value) : "")}
             >
               <option value="">Choose a client…</option>
               <optgroup label="Active / prospective">
@@ -220,74 +249,19 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
             </select>
           </label>
         </div>
-        <span className="field-label">Letter type</span>
-        <div className="chip-group">
-          {categories.map((cat) => (
-            <span
-              key={cat.id}
-              role="button"
-              tabIndex={0}
-              className={`chip ${categoryId === cat.id ? "active" : ""}`}
-              onClick={() => setCategoryId(cat.id)}
-            >
-              {cat.name}
-            </span>
-          ))}
-        </div>
-        {categories.length === 0 && (
-          <p className="hint" style={{ margin: "10px 0 0" }}>
-            No letter types yet — add one under Admin &amp; Settings → Categories → Letters.
-          </p>
-        )}
+        <label className="edit-field">
+          <span>Letter type</span>
+          <input
+            className="input-compact"
+            value={letterType}
+            disabled={inConversation}
+            onChange={(event) => setLetterType(event.target.value)}
+            placeholder="e.g. Fee estimate cover letter for the ancillary relief matter"
+          />
+        </label>
       </div>
 
-      <p className="settings-section-title">2. The facts</p>
-      <div className="edit-panel">
-        <div className="edit-row">
-          <label className="edit-field">
-            <span>Amount (£)</span>
-            <input
-              className="input-compact"
-              type="number"
-              inputMode="decimal"
-              step="0.01"
-              value={amount}
-              onChange={(event) => setAmount(event.target.value)}
-            />
-          </label>
-          <label className="edit-field">
-            <span>Reference</span>
-            <input className="input-compact" value={reference} onChange={(event) => setReference(event.target.value)} />
-          </label>
-          <label className="edit-field">
-            <span>Key date</span>
-            <input
-              className="input-compact"
-              type="date"
-              value={keyDate}
-              onChange={(event) => setKeyDate(event.target.value)}
-            />
-          </label>
-        </div>
-        <span className="field-label" style={{ marginTop: 12, display: "block" }}>
-          Tone
-        </span>
-        <div className="chip-group">
-          {TONE_OPTIONS.map((option) => (
-            <span
-              key={option}
-              role="button"
-              tabIndex={0}
-              className={`chip ${tone === option ? "active" : ""}`}
-              onClick={() => setTone(option)}
-            >
-              {option}
-            </span>
-          ))}
-        </div>
-      </div>
-
-      <p className="settings-section-title">3. Personal details — always placeholders</p>
+      <p className="settings-section-title">2. Personal details — always placeholders</p>
       <div className="edit-panel">
         <div className="token-checklist">
           {PERSONAL_FIELD_OPTIONS.map((field) => (
@@ -305,18 +279,9 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
         </div>
       </div>
       <p className="panel-note">
-        The real name and address never leave your database and never reach the AI — only the token does.
+        The real name and address never leave your database and never reach the AI — only the token does, for the
+        whole conversation below.
       </p>
-
-      <p className="settings-section-title">4. Anything specific to add?</p>
-      <div className="edit-panel">
-        <textarea
-          rows={3}
-          value={bespokeRequest}
-          onChange={(event) => setBespokeRequest(event.target.value)}
-          placeholder="Anything this letter needs that the guided fields above don't cover."
-        />
-      </div>
 
       {error && (
         <p className="error" role="alert">
@@ -324,22 +289,52 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
         </p>
       )}
 
-      <div className="row-actions" style={{ marginBottom: 36 }}>
-        <button type="button" onClick={handleGenerate} disabled={generating || clientId === ""}>
-          <Icon name="add" /> {generating ? "Drafting…" : draftBody ? "Regenerate" : "Generate draft"}
-        </button>
-      </div>
-
-      {draftBody && (
+      {!inConversation ? (
+        <div className="row-actions" style={{ marginBottom: 36 }}>
+          <button type="button" onClick={handleStart} disabled={sending}>
+            <Icon name="add" /> {sending ? "Starting…" : "Start drafting"}
+          </button>
+        </div>
+      ) : (
         <>
-          <p className="settings-section-title">Draft</p>
-          <div className="edit-panel">
-            <textarea rows={12} value={draftBody} onChange={(event) => setDraftBody(event.target.value)} />
+          <p className="settings-section-title">3. Draft it together</p>
+          <div className="edit-panel chat-transcript">
+            {messages.map((message, i) => (
+              <div className={`chat-message chat-message-${message.role}`} key={i}>
+                <div className="chat-bubble">{renderWithTokens(message.content)}</div>
+              </div>
+            ))}
+            {sending && (
+              <div className="chat-message chat-message-assistant">
+                <div className="chat-bubble chat-bubble-pending">Thinking…</div>
+              </div>
+            )}
           </div>
 
-          <div className="row-actions" style={{ marginBottom: 20 }}>
-            <button type="button" className="secondary" onClick={handleReview} disabled={reviewing}>
-              <Icon name="tag" /> {reviewing ? "Reviewing…" : "Run compliance review"}
+          <form onSubmit={handleSend} className="chat-input-row">
+            <textarea
+              rows={2}
+              value={chatInput}
+              onChange={(event) => setChatInput(event.target.value)}
+              placeholder="Reply to the drafting agent…"
+              disabled={sending}
+            />
+            <button type="submit" disabled={sending || !chatInput.trim()}>
+              <Icon name="add" /> Send
+            </button>
+          </form>
+
+          <div className="row-actions" style={{ margin: "16px 0 36px" }}>
+            <button
+              type="button"
+              className="secondary"
+              onClick={handleReview}
+              disabled={!lastAssistantMessage || reviewing}
+            >
+              <Icon name="tag" /> {reviewing ? "Reviewing…" : "Send to review"}
+            </button>
+            <button type="button" className="secondary" onClick={startOver}>
+              Start over
             </button>
           </div>
 
@@ -356,7 +351,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                   <p className="error" role="alert">
                     Possible personal data found outside the placeholder tokens
                     {review.piiMatches.length > 0 ? `: ${review.piiMatches.map((m) => m.kind).join(", ")}` : ""}.
-                    Edit the draft above before saving.
+                    Ask the agent to fix it before saving.
                   </p>
                 )}
                 {!review.reviewConfigured && (
@@ -381,7 +376,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
           )}
 
           <div className="row-actions" style={{ marginBottom: 40 }}>
-            <button type="button" onClick={handleSave} disabled={saving}>
+            <button type="button" onClick={handleSave} disabled={!lastAssistantMessage || saving}>
               <Icon name="save" /> {saving ? "Saving…" : "Save to history"}
             </button>
           </div>
@@ -412,7 +407,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                   {history.map((letter) => (
                     <tr key={letter.id}>
                       <td>{new Date(letter.createdAt).toLocaleDateString("en-GB")}</td>
-                      <td>{letter.categoryName ?? "—"}</td>
+                      <td>{letter.letterType ?? "—"}</td>
                       <td>
                         <div className="row-actions">
                           <button type="button" className="danger" onClick={() => handleDeleteHistory(letter.id)}>

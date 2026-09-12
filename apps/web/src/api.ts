@@ -785,35 +785,6 @@ export function documentDownloadUrl(id: number): string {
   return `${API_URL}/api/documents/${id}/download`;
 }
 
-export interface LetterCategory {
-  id: number;
-  name: string;
-  draftingInstruction: string;
-}
-
-export function getLetterCategories(): Promise<LetterCategory[]> {
-  return request("/api/letter-categories");
-}
-
-export function addLetterCategory(name: string, draftingInstruction: string): Promise<LetterCategory> {
-  return request("/api/letter-categories", { method: "POST", body: JSON.stringify({ name, draftingInstruction }) });
-}
-
-export function updateLetterCategory(
-  id: number,
-  name: string,
-  draftingInstruction: string,
-): Promise<LetterCategory> {
-  return request(`/api/letter-categories/${id}`, {
-    method: "PATCH",
-    body: JSON.stringify({ name, draftingInstruction }),
-  });
-}
-
-export function deleteLetterCategory(id: number): Promise<{ ok: boolean }> {
-  return request(`/api/letter-categories/${id}`, { method: "DELETE" });
-}
-
 export interface ReviewFlag {
   severity: "ok" | "concern";
   text: string;
@@ -828,14 +799,8 @@ export interface Letter {
   id: number;
   clientId: number;
   clientName: string;
-  letterCategoryId: number | null;
-  categoryName: string | null;
-  amount: number | null;
-  reference: string | null;
-  keyDate: string | null;
-  tone: string | null;
+  letterType: string | null;
   personalFields: string[];
-  bespokeRequest: string | null;
   draftBody: string;
   reviewFlags: ReviewFlag[] | null;
   piiScanClean: boolean | null;
@@ -859,24 +824,24 @@ export function getDeletedLetters(): Promise<DeletedLetter[]> {
   return request("/api/letters/deleted");
 }
 
-export interface DraftLetterInput {
-  clientId: number;
-  letterCategoryId?: number | null;
-  amount?: number | null;
-  reference?: string | null;
-  keyDate?: string | null;
-  tone?: string | null;
-  personalFields: string[];
-  bespokeRequest?: string | null;
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
 }
 
-// Never persisted server-side -- this is purely "ask the AI to draft
-// something," returning text for the caller to show, regenerate, or hand
-// edit before choosing to save it (addLetter below). See ARCHITECTURE.md's
-// Correspondence section for why personalFields carries only token names,
-// never real client data.
-export function draftLetter(input: DraftLetterInput): Promise<{ draftBody: string }> {
-  return request("/api/letters/draft", { method: "POST", body: JSON.stringify(input) });
+// Stateless -- the conversation lives in this component's own state, and
+// the whole history is resent on every turn. Nothing about a letter's
+// drafting conversation is persisted server-side, only the final accepted
+// draft (addLetter below). See ARCHITECTURE.md's Correspondence section
+// for why personalFields carries only token names, never real client
+// data -- that's what's fixed for the whole conversation, not re-sent as
+// free text on each turn.
+export function chatDraftLetter(input: {
+  letterType: string;
+  personalFields: string[];
+  messages: ChatMessage[];
+}): Promise<{ reply: string }> {
+  return request("/api/letters/chat", { method: "POST", body: JSON.stringify(input) });
 }
 
 export interface ReviewLetterResult {
@@ -890,7 +855,10 @@ export function reviewLetter(draftBody: string): Promise<ReviewLetterResult> {
   return request("/api/letters/review", { method: "POST", body: JSON.stringify({ draftBody }) });
 }
 
-export interface SaveLetterInput extends DraftLetterInput {
+export interface SaveLetterInput {
+  clientId: number;
+  letterType?: string | null;
+  personalFields: string[];
   draftBody: string;
   reviewFlags?: ReviewFlag[] | null;
   piiScanClean?: boolean | null;

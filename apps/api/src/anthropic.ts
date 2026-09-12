@@ -10,7 +10,16 @@ interface AnthropicResponse {
   content: Array<{ type: string; text?: string }>;
 }
 
-export async function callClaude(apiKey: string, system: string, userMessage: string): Promise<string> {
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+// Takes a message array rather than a single string so the same helper
+// covers both a genuine multi-turn conversation (Correspondence's
+// drafting chat) and a one-shot call (the compliance review, which just
+// wraps its input as a single-message array) without two code paths.
+export async function callClaude(apiKey: string, system: string, messages: ChatMessage[]): Promise<string> {
   const res = await fetch(ANTHROPIC_API_URL, {
     method: "POST",
     headers: {
@@ -22,7 +31,7 @@ export async function callClaude(apiKey: string, system: string, userMessage: st
       model: MODEL,
       max_tokens: 1024,
       system,
-      messages: [{ role: "user", content: userMessage }],
+      messages,
     }),
   });
 
