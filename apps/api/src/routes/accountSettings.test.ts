@@ -11,11 +11,17 @@ async function sessionCookie(): Promise<string> {
 }
 
 function fakeEnv(
-  options: { inviteCode?: string; disabledFeatures?: string[]; complianceGuidelines?: string } = {},
+  options: {
+    inviteCode?: string;
+    disabledFeatures?: string[];
+    complianceGuidelines?: string;
+    aiModel?: string;
+  } = {},
 ): Env {
   let inviteCode = options.inviteCode ?? "";
   let disabledFeatures = JSON.stringify(options.disabledFeatures ?? []);
   let complianceGuidelines = options.complianceGuidelines ?? "";
+  let aiModel = options.aiModel ?? null;
 
   return {
     SESSION_SECRET: SECRET,
@@ -32,6 +38,7 @@ function fakeEnv(
               invite_code: inviteCode,
               disabled_features: disabledFeatures,
               compliance_guidelines: complianceGuidelines,
+              ai_model: aiModel,
             }) as T,
           run: async () => {
             if (sql.includes("SET invite_code")) {
@@ -43,6 +50,9 @@ function fakeEnv(
             } else if (sql.includes("SET compliance_guidelines")) {
               const [newGuidelines] = boundArgs as [string];
               complianceGuidelines = newGuidelines;
+            } else if (sql.includes("SET ai_model")) {
+              const [newModel] = boundArgs as [string];
+              aiModel = newModel;
             }
             return { success: true, meta: {} };
           },
@@ -67,13 +77,33 @@ describe("GET /api/account-settings", () => {
       fakeEnv({ inviteCode: "LETMEIN", disabledFeatures: ["time"] }),
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ inviteCode: "LETMEIN", disabledFeatures: ["time"], complianceGuidelines: "" });
+    expect(await res.json()).toEqual({
+      inviteCode: "LETMEIN",
+      disabledFeatures: ["time"],
+      complianceGuidelines: "",
+      aiModel: "claude-haiku-4-5",
+    });
   });
 
   it("returns defaults when nothing has been set yet", async () => {
     const cookie = await sessionCookie();
     const res = await app.request("/api/account-settings", { headers: { Cookie: cookie } }, fakeEnv());
-    expect(await res.json()).toEqual({ inviteCode: "", disabledFeatures: [], complianceGuidelines: "" });
+    expect(await res.json()).toEqual({
+      inviteCode: "",
+      disabledFeatures: [],
+      complianceGuidelines: "",
+      aiModel: "claude-haiku-4-5",
+    });
+  });
+
+  it("returns the account's chosen AI model when one has been saved", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/account-settings",
+      { headers: { Cookie: cookie } },
+      fakeEnv({ aiModel: "claude-sonnet-5" }),
+    );
+    expect((await res.json()).aiModel).toBe("claude-sonnet-5");
   });
 });
 
@@ -220,5 +250,33 @@ describe("PUT /api/account-settings/compliance-guidelines", () => {
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ complianceGuidelines: "" });
+  });
+});
+
+describe("PUT /api/account-settings/ai-model", () => {
+  it("rejects a request with no session", async () => {
+    const res = await app.request("/api/account-settings/ai-model", { method: "PUT" }, fakeEnv());
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects a model that isn't in the supported list", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/account-settings/ai-model",
+      { method: "PUT", headers: { Cookie: cookie }, body: JSON.stringify({ aiModel: "gpt-4" }) },
+      fakeEnv(),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("saves a supported model", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/account-settings/ai-model",
+      { method: "PUT", headers: { Cookie: cookie }, body: JSON.stringify({ aiModel: "claude-sonnet-5" }) },
+      fakeEnv({ aiModel: "claude-haiku-4-5" }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ aiModel: "claude-sonnet-5" });
   });
 });

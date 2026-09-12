@@ -19,6 +19,7 @@ const TABLES = [
   "document_categories",
   "documents",
   "letters",
+  "ai_usage",
   "tasks",
   "task_occurrences",
   "intermediary_firms",
