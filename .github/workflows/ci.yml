@@ -116,8 +116,18 @@ jobs:
       # binding pattern as DOCUMENT_ENCRYPTION_KEY above: until this secret
       # is set, drafting/review report themselves as unconfigured (500)
       # rather than breaking anything else in the app.
+      #
+      # continue-on-error here (unlike the other secret-upload steps above)
+      # because, unlike DOCUMENT_ENCRYPTION_KEY, this secret genuinely does
+      # not exist yet the first time this workflow runs after this feature
+      # ships — wrangler-action hard-fails a step with "Value for secret ...
+      # not found in environment" when the referenced secret has never been
+      # created, which would otherwise abort deploy entirely (skipping the
+      # Worker/Pages deploy for every feature, not just this one) until the
+      # secret is added.
       - name: Set Anthropic API key
         uses: cloudflare/wrangler-action@v3
+        continue-on-error: true
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
