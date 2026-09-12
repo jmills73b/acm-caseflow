@@ -182,13 +182,23 @@ Notable business logic worth knowing about, not obvious from the route list alon
   into the system prompt fresh on every call — so the drafting agent's prompt only
   ever contains token names, not values, for the whole conversation, not just the
   first turn. There's no redaction step to get wrong, because the model is never given
-  anything to redact. `POST /letters/review` always runs a deterministic regex scan
-  (`packages/core`'s `scanForPii`) as a hard gate regardless of whether
-  `ANTHROPIC_API_KEY` is configured; the AI-based compliance/tone review layered on
-  top of that is advisory only (its flags are never a pass/fail gate) and reads its
-  ruleset from `account_settings.compliance_guidelines` — free text the account holder
-  maintains themselves, since only they know which regulatory framework actually
-  applies to their practice. Both agents share one account-wide model choice
+  anything to redact. Before drafting, the agent's system prompt has it work through an
+  internal analysis (facts established so far, what the client wants, legal issues,
+  applicable law/principles, a recommended position, anything uncertain) that never
+  appears in its reply — it only shapes how it drafts, and a gap found there is what
+  drives the existing "ask a clarifying question instead of drafting" behaviour.
+  `POST /letters/review` always runs a deterministic regex scan (`packages/core`'s
+  `scanForPii`) as a hard gate regardless of whether `ANTHROPIC_API_KEY` is configured;
+  the AI-based review layered on top of that plays supervising solicitor — checking the
+  draft against the drafting conversation (its only record of what was actually
+  discussed) for factual/legal accuracy, invented content, over/under-stated arguments,
+  tone, omissions, and anything the recipient could exploit, as well as the firm's own
+  compliance guidelines — and is advisory only (its flags are never a pass/fail gate).
+  The conversation is optional in the request (a review with none falls back to judging
+  the letter on its own terms) but the live UI always sends it. Guidelines are read from
+  `account_settings.compliance_guidelines` — free text the account holder maintains
+  themselves, since only they know which regulatory framework actually applies to their
+  practice. Both agents share one account-wide model choice
   (`account_settings.ai_model`, Admin's AI settings panel — Haiku 4.5 or Sonnet 5, see
   `AI_MODELS` in `anthropic.ts`), and every call's token counts are logged to
   `ai_usage` (`endpoint`/`model`/`input_tokens`/`output_tokens`); `GET /letters/usage`

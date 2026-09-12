@@ -887,8 +887,12 @@ export interface ReviewLetterResult {
   flags: ReviewFlag[];
 }
 
-export function reviewLetter(draftBody: string): Promise<ReviewLetterResult> {
-  return request("/api/letters/review", { method: "POST", body: JSON.stringify({ draftBody }) });
+// Passing the conversation lets the review agent check the draft against
+// what was actually discussed (factual/legal accuracy, invented content)
+// rather than reviewing the letter in isolation with nothing to check it
+// against -- see letters.ts's /review handler.
+export function reviewLetter(draftBody: string, messages: ChatMessage[]): Promise<ReviewLetterResult> {
+  return request("/api/letters/review", { method: "POST", body: JSON.stringify({ draftBody, messages }) });
 }
 
 export interface SaveLetterInput {

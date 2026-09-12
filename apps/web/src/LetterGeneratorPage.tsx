@@ -305,7 +305,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
     setError(null);
     setReviewing(true);
     try {
-      setReview(await reviewLetter(lastAssistantMessage.content));
+      setReview(await reviewLetter(lastAssistantMessage.content, messages));
       setSelectedFlags(new Set());
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't review the letter");
@@ -427,8 +427,9 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
       </button>
       <h1>Correspondence</h1>
       <p className="hint">
-        Draft a letter through a conversation with the drafting agent, then send it for a compliance and
-        personal-data review before you use it. Personal details are never sent to the AI — the letter always uses
+        Draft a letter through a conversation with the drafting agent, then send it for review — a supervising-
+        solicitor-style check against what was actually discussed, plus the firm's compliance guidelines and a
+        personal-data scan — before you use it. Personal details are never sent to the AI — the letter always uses
         placeholders, filled in afterward outside the system.
       </p>
 
@@ -579,7 +580,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
 
           {review && (
             <>
-              <p className="settings-section-title">Compliance &amp; privacy review</p>
+              <p className="settings-section-title">Legal &amp; compliance review</p>
               <div className="edit-panel">
                 <div style={{ marginBottom: review.flags.length > 0 ? 14 : 0 }}>
                   <span className={`status ${review.piiScanClean ? "status-complete" : ""}`}>
@@ -595,7 +596,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                 )}
                 {!review.reviewConfigured && (
                   <p className="hint">
-                    Advisory compliance review isn't configured yet (needs an Anthropic API key) — the personal-data
+                    Advisory legal review isn't configured yet (needs an Anthropic API key) — the personal-data
                     scan above still ran.
                   </p>
                 )}
