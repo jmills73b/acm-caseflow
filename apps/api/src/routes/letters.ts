@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { scanForPii } from "@acm-caseflow/core";
 import type { AppEnv } from "../index";
 import { requireAuth } from "./auth";
-import { callClaude, type ChatMessage } from "../anthropic";
+import { AI_MODELS, DEFAULT_MODEL, callClaude, type ChatMessage } from "../anthropic";
 
 const letters = new Hono<AppEnv>();
 
@@ -69,6 +69,33 @@ letters.get("/", async (c) => {
   return c.json(results.map(toLetter));
 });
 
+// Shared by both agent calls below -- the model choice is one account-wide
+// setting (Admin's AI settings panel), applied to drafting and review
+// alike, rather than a separate picker per agent. Simpler to reason about,
+// and easy to split later if one agent turns out to need a different model
+// than the other.
+async function getAccountAiSettings(db: D1Database): Promise<{ model: string; complianceGuidelines: string }> {
+  const row = await db
+    .prepare("SELECT ai_model, compliance_guidelines FROM account_settings WHERE id = 1")
+    .first<{ ai_model: string | null; compliance_guidelines: string | null }>();
+  return {
+    model: row?.ai_model || DEFAULT_MODEL,
+    complianceGuidelines: row?.compliance_guidelines?.trim() ?? "",
+  };
+}
+
+async function logAiUsage(
+  db: D1Database,
+  endpoint: "chat" | "review",
+  model: string,
+  usage: { inputTokens: number; outputTokens: number },
+): Promise<void> {
+  await db
+    .prepare("INSERT INTO ai_usage (endpoint, model, input_tokens, output_tokens) VALUES (?, ?, ?, ?)")
+    .bind(endpoint, model, usage.inputTokens, usage.outputTokens)
+    .run();
+}
+
 letters.get("/deleted", async (c) => {
   const { results } = await c.env.DB.prepare(
     `SELECT ${LIST_COLUMNS}, deleters.email AS deleted_by_email, letters.deleted_at
@@ -85,6 +112,33 @@ letters.get("/deleted", async (c) => {
       deletedByEmail: row.deleted_by_email,
     })),
   );
+});
+
+// Admin's "AI usage" panel -- grouped by model since Haiku and Sonnet are
+// priced differently (see AI_MODELS in anthropic.ts), so a flat token sum
+// alone couldn't produce an accurate cost estimate.
+letters.get("/usage", async (c) => {
+  const { results } = await c.env.DB.prepare(
+    "SELECT model, COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens " +
+      "FROM ai_usage GROUP BY model",
+  ).all<{ model: string; input_tokens: number; output_tokens: number }>();
+
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  let estimatedCostUsd = 0;
+  const byModel = results.map((row) => {
+    const pricing = AI_MODELS.find((m) => m.id === row.model);
+    const cost = pricing
+      ? (row.input_tokens / 1_000_000) * pricing.inputPricePerMTok +
+        (row.output_tokens / 1_000_000) * pricing.outputPricePerMTok
+      : 0;
+    totalInputTokens += row.input_tokens;
+    totalOutputTokens += row.output_tokens;
+    estimatedCostUsd += cost;
+    return { model: row.model, inputTokens: row.input_tokens, outputTokens: row.output_tokens, estimatedCostUsd: cost };
+  });
+
+  return c.json({ totalInputTokens, totalOutputTokens, estimatedCostUsd, byModel });
 });
 
 interface ChatRequest {
@@ -138,6 +192,7 @@ letters.post("/chat", async (c) => {
     return c.json({ error: "messages must be a non-empty list ending with a user message" }, 400);
   }
 
+  const { model } = await getAccountAiSettings(c.env.DB);
   const personalFields = Array.isArray(body.personalFields) ? body.personalFields : [];
   const tokens = personalFields.map((field) => `{{${field}}}`);
 
@@ -156,8 +211,9 @@ letters.post("/chat", async (c) => {
   ].join("\n\n");
 
   try {
-    const reply = await callClaude(c.env.ANTHROPIC_API_KEY, system, body.messages);
-    return c.json({ reply });
+    const { text, usage } = await callClaude(c.env.ANTHROPIC_API_KEY, model, system, body.messages);
+    await logAiUsage(c.env.DB, "chat", model, usage);
+    return c.json({ reply: text });
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : "Could not reach the drafting agent" }, 502);
   }
@@ -185,10 +241,7 @@ letters.post("/review", async (c) => {
     return c.json({ piiScanClean: piiScan.clean, piiMatches: piiScan.matches, reviewConfigured: false, flags: [] });
   }
 
-  const settings = await c.env.DB.prepare("SELECT compliance_guidelines FROM account_settings WHERE id = 1").first<{
-    compliance_guidelines: string;
-  }>();
-  const guidelines = settings?.compliance_guidelines?.trim();
+  const { model, complianceGuidelines: guidelines } = await getAccountAiSettings(c.env.DB);
 
   const system = [
     "You review draft client correspondence for a UK family-law costs consultancy against the firm's own " +
@@ -201,7 +254,10 @@ letters.post("/review", async (c) => {
   ].join("\n\n");
 
   try {
-    const raw = await callClaude(c.env.ANTHROPIC_API_KEY, system, [{ role: "user", content: draftBody }]);
+    const { text: raw, usage } = await callClaude(c.env.ANTHROPIC_API_KEY, model, system, [
+      { role: "user", content: draftBody },
+    ]);
+    await logAiUsage(c.env.DB, "review", model, usage);
     const flags: ReviewFlag[] = raw
       .split("\n")
       .map((line) => line.trim())

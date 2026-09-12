@@ -95,17 +95,18 @@ idempotent data imports from the spreadsheet this app replaces.
 | 0025 | `0025_user_full_name.sql` | Adds `users.full_name` (nullable — the pre-existing account sets it later via `PATCH /api/me`). |
 | 0026 | `0026_correspondence.sql` | Adds `letter_categories`, `letters` (soft delete, like `documents`); adds `account_settings.compliance_guidelines`. |
 | 0027 | `0027_correspondence_chat_redesign.sql` | Drops `letter_categories` and `letters`' `letter_category_id`/`amount`/`reference`/`key_date`/`tone`/`bespoke_request` columns; adds `letters.letter_type` (free text). Letter type and every fact/tone detail moved into the drafting conversation itself — no production data depended on the dropped columns yet. |
+| 0028 | `0028_ai_model_and_usage.sql` | Adds `account_settings.ai_model` (defaults to Haiku 4.5); adds `ai_usage` (per-call token counts for Correspondence's agents, keyed by `endpoint`/`model`). |
 
-### Current tables (24)
+### Current tables (25)
 
 `users` · `clients` · `intermediary_firms` · `tax_year_settings` · `invoices` ·
 `expenses` · `expense_categories` · `invoice_settings` · `invoice_batches` ·
 `account_settings` · `time_categories` · `time_settings` · `hourly_rates` ·
 `time_entries` · `client_categories` · `client_category_links` · `note_categories` ·
 `client_notes` · `client_note_versions` · `tasks` · `task_occurrences` ·
-`document_categories` · `documents` · `letters`
+`document_categories` · `documents` · `letters` · `ai_usage`
 
-`apps/api/src/routes/export.ts`'s `TABLES` constant covers 22 of these for account
+`apps/api/src/routes/export.ts`'s `TABLES` constant covers 23 of these for account
 data export — `users` and `account_settings` are deliberately excluded (credentials
 and app config, not business data).
 
@@ -118,7 +119,7 @@ system, just signed-in-or-not (see [Auth model](#auth-model)).
 | Mount path | File | Endpoints |
 |---|---|---|
 | `/api` | `auth.ts` | `GET /setup/status`, `POST /setup`, `POST /register`, `POST /login`, `GET /me`, `PATCH /me`, `POST /logout` |
-| `/api/account-settings` | `accountSettings.ts` | `GET /`, `PUT /` (invite code), `PUT /features` (dashboard tile toggles) |
+| `/api/account-settings` | `accountSettings.ts` | `GET /`, `PUT /` (invite code), `PUT /features` (dashboard tile toggles), `PUT /compliance-guidelines`, `PUT /ai-model` |
 | `/api/client-categories` | `clientCategories.ts` | `GET /`, `POST /`, `PATCH /:id`, `DELETE /:id` |
 | `/api/client-notes` | `clientNotes.ts` | `GET /`, `GET /:id`, `POST /`, `POST /:id/versions` |
 | `/api/clients` | `clients.ts` | `GET /`, `POST /`, `PATCH /:id`, `DELETE /:id` |
@@ -132,7 +133,7 @@ system, just signed-in-or-not (see [Auth model](#auth-model)).
 | `/api/invoice-batches` | `invoiceBatches.ts` | `GET /`, `GET /:id`, `POST /`, `DELETE /:id` |
 | `/api/invoice-settings` | `invoiceSettings.ts` | `GET /`, `PUT /` |
 | `/api/invoices` | `invoices.ts` | `GET /`, `POST /`, `PATCH /:id`, `DELETE /:id` |
-| `/api/letters` | `letters.ts` | `GET /`, `GET /deleted`, `POST /chat`, `POST /review`, `POST /`, `DELETE /:id` |
+| `/api/letters` | `letters.ts` | `GET /`, `GET /deleted`, `GET /usage`, `POST /chat`, `POST /review`, `POST /`, `DELETE /:id` |
 | `/api/note-categories` | `noteCategories.ts` | `GET /`, `POST /`, `PATCH /:id`, `DELETE /:id` |
 | `/api/tasks` | `tasks.ts` | `GET /`, `GET /:id`, `POST /`, `PATCH /:id`, `POST /:id/actions` |
 | `/api/tax-year-settings` | `taxYearSettings.ts` | `GET /:startYear`, `POST /:startYear`, `POST /:startYear/split`, `PUT /:startYear/rates` |
@@ -186,7 +187,13 @@ Notable business logic worth knowing about, not obvious from the route list alon
   top of that is advisory only (its flags are never a pass/fail gate) and reads its
   ruleset from `account_settings.compliance_guidelines` — free text the account holder
   maintains themselves, since only they know which regulatory framework actually
-  applies to their practice.
+  applies to their practice. Both agents share one account-wide model choice
+  (`account_settings.ai_model`, Admin's AI settings panel — Haiku 4.5 or Sonnet 5, see
+  `AI_MODELS` in `anthropic.ts`), and every call's token counts are logged to
+  `ai_usage` (`endpoint`/`model`/`input_tokens`/`output_tokens`); `GET /letters/usage`
+  aggregates that into a per-model and total estimated-cost figure (from Anthropic's
+  published per-token pricing, computed by this app — not a live account balance) for
+  the Usage admin tab.
 
 ## Frontend
 
@@ -200,9 +207,10 @@ All `.tsx` files live flat in `apps/web/src/` (no subfolders). Roughly three kin
   Billing / Account) — one `*Manager.tsx`/`*Panel.tsx` per manageable list or setting:
   `ClientCategoryManager`, `NoteCategoryManager`, `DocumentCategoryManager`,
   `ExpenseCategoryManager`, `TimeCategoryManager`, `TimeRateManager`,
-  `InvoiceSettingsManager`, `TaxRatesManager`, `ComplianceGuidelinesPanel`,
-  `FeatureManager`, `InviteCodePanel`, `ProfileManager`, `UsagePanel`,
-  `AppearanceManager`.
+  `InvoiceSettingsManager`, `TaxRatesManager`, `AiSettingsPanel` (model choice +
+  compliance guidelines — both feed Correspondence's agents), `FeatureManager`,
+  `InviteCodePanel`, `ProfileManager`, `UsagePanel` (Cloudflare free-tier usage +
+  Correspondence's AI token/cost ledger), `AppearanceManager`.
 - **Shared components**: `Brand`, `ThemeQuickSwitch`, `TaskQuickPanel`,
   `DayOfWeekPicker`, `FollowUpPicker`, `MarkdownToolbar`, `icons` (the `<Icon />`
   component and its `IconName` union — see [Icon system](#icon-system)). Plus

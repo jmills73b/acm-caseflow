@@ -393,6 +393,7 @@ export interface AccountSettings {
   inviteCode: string;
   disabledFeatures: string[];
   complianceGuidelines: string;
+  aiModel: string;
 }
 
 export function getAccountSettings(): Promise<AccountSettings> {
@@ -412,6 +413,37 @@ export function updateComplianceGuidelines(complianceGuidelines: string): Promis
     method: "PUT",
     body: JSON.stringify({ complianceGuidelines }),
   });
+}
+
+// Mirrors anthropic.ts's AI_MODELS on the backend -- kept as a small fixed
+// list here rather than fetched, same as LetterGeneratorPage's personal-
+// field tokens, since it only ever changes when a new Claude generation
+// ships and this app is updated to support it.
+export const AI_MODEL_OPTIONS = [
+  { id: "claude-haiku-4-5", label: "Haiku 4.5 — fast & economical" },
+  { id: "claude-sonnet-5", label: "Sonnet 5 — higher quality" },
+];
+
+export function updateAiModel(aiModel: string): Promise<{ aiModel: string }> {
+  return request("/api/account-settings/ai-model", { method: "PUT", body: JSON.stringify({ aiModel }) });
+}
+
+export interface AiUsageByModel {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  estimatedCostUsd: number;
+}
+
+export interface AiUsageSummary {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  estimatedCostUsd: number;
+  byModel: AiUsageByModel[];
+}
+
+export function getAiUsage(): Promise<AiUsageSummary> {
+  return request("/api/letters/usage");
 }
 
 export interface TimeSettings {

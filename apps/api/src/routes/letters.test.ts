@@ -10,8 +10,8 @@ async function sessionCookie(userId = 1): Promise<string> {
   return `session=${await createSessionToken({ userId, exp: Math.floor(Date.now() / 1000) + 60 }, SECRET)}`;
 }
 
-function claudeResponse(text: string) {
-  return new Response(JSON.stringify({ content: [{ type: "text", text }] }), { status: 200 });
+function claudeResponse(text: string, usage = { input_tokens: 42, output_tokens: 84 }) {
+  return new Response(JSON.stringify({ content: [{ type: "text", text }], usage }), { status: 200 });
 }
 
 interface LetterRow {
@@ -28,6 +28,13 @@ interface LetterRow {
   deleted_by: number | null;
 }
 
+interface AiUsageRow {
+  endpoint: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+}
+
 function fakeEnv(
   options: {
     apiKey?: string;
@@ -35,6 +42,8 @@ function fakeEnv(
     users?: Array<{ id: number; email: string }>;
     letters?: LetterRow[];
     complianceGuidelines?: string;
+    aiModel?: string;
+    aiUsage?: AiUsageRow[];
   } = {},
 ): Env {
   const clients = options.clients ?? [{ id: 1, name: "Sarah Whitfield" }];
@@ -42,6 +51,9 @@ function fakeEnv(
   const letterStore = new Map<number, LetterRow>((options.letters ?? []).map((l) => [l.id, l]));
   let nextId = Math.max(0, ...[...letterStore.keys()]) + 1;
   const complianceGuidelines = options.complianceGuidelines ?? "";
+  const aiModel = options.aiModel ?? null;
+  // Not a copy -- tests pass their own array in to observe what gets logged.
+  const aiUsageRows: AiUsageRow[] = options.aiUsage ?? [];
 
   function enrich(row: LetterRow) {
     return {
@@ -70,8 +82,8 @@ function fakeEnv(
             return statement;
           },
           first: async <T,>() => {
-            if (sql.includes("SELECT compliance_guidelines FROM account_settings")) {
-              return { compliance_guidelines: complianceGuidelines } as T;
+            if (sql.includes("SELECT ai_model, compliance_guidelines FROM account_settings")) {
+              return { ai_model: aiModel, compliance_guidelines: complianceGuidelines } as T;
             }
             if (sql.includes("SELECT id FROM clients WHERE id = ?")) {
               const [id] = boundArgs as [number];
@@ -112,6 +124,18 @@ function fakeEnv(
             return null;
           },
           all: async <T,>() => {
+            if (sql.includes("FROM ai_usage GROUP BY model")) {
+              const byModel = new Map<string, { input_tokens: number; output_tokens: number }>();
+              for (const row of aiUsageRows) {
+                const existing = byModel.get(row.model) ?? { input_tokens: 0, output_tokens: 0 };
+                byModel.set(row.model, {
+                  input_tokens: existing.input_tokens + row.input_tokens,
+                  output_tokens: existing.output_tokens + row.output_tokens,
+                });
+              }
+              const results = [...byModel.entries()].map(([model, sums]) => ({ model, ...sums }));
+              return { results: results as T[], success: true, meta: {} };
+            }
             if (sql.includes("letters.deleted_at IS NOT NULL")) {
               const rows = [...letterStore.values()]
                 .filter((l) => l.deleted_at !== null)
@@ -136,6 +160,11 @@ function fakeEnv(
             return { results: [] as T[], success: true, meta: {} };
           },
           run: async () => {
+            if (sql.includes("INSERT INTO ai_usage")) {
+              const [endpoint, model, inputTokens, outputTokens] = boundArgs as [string, string, number, number];
+              aiUsageRows.push({ endpoint, model, input_tokens: inputTokens, output_tokens: outputTokens });
+              return { success: true, meta: {} };
+            }
             if (sql.includes("UPDATE letters SET deleted_at")) {
               const [deletedBy, id] = boundArgs as [number, number];
               const row = letterStore.get(id);
@@ -301,6 +330,45 @@ describe("POST /api/letters/chat", () => {
     );
     expect(res.status).toBe(502);
   });
+
+  it("sends the account's configured AI model to Anthropic, defaulting to Haiku 4.5", async () => {
+    const cookie = await sessionCookie();
+    const fetchMock = vi.fn(async () => claudeResponse("Dear {{CLIENT_NAME}},"));
+    vi.stubGlobal("fetch", fetchMock);
+    await app.request(
+      "/api/letters/chat",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify(validBody) },
+      fakeEnv({ apiKey: API_KEY, aiModel: "claude-sonnet-5" }),
+    );
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).model).toBe("claude-sonnet-5");
+
+    const fetchMockDefault = vi.fn(async () => claudeResponse("Dear {{CLIENT_NAME}},"));
+    vi.stubGlobal("fetch", fetchMockDefault);
+    await app.request(
+      "/api/letters/chat",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify(validBody) },
+      fakeEnv({ apiKey: API_KEY }),
+    );
+    expect(JSON.parse(fetchMockDefault.mock.calls[0][1].body).model).toBe("claude-haiku-4-5");
+  });
+
+  it("logs the call's token usage against the model used", async () => {
+    const cookie = await sessionCookie();
+    const aiUsage: AiUsageRow[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => claudeResponse("Dear {{CLIENT_NAME}},", { input_tokens: 120, output_tokens: 60 })),
+    );
+    const res = await app.request(
+      "/api/letters/chat",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify(validBody) },
+      fakeEnv({ apiKey: API_KEY, aiModel: "claude-sonnet-5", aiUsage }),
+    );
+    expect(res.status).toBe(200);
+    expect(aiUsage).toEqual([
+      { endpoint: "chat", model: "claude-sonnet-5", input_tokens: 120, output_tokens: 60 },
+    ]);
+  });
 });
 
 describe("POST /api/letters/review", () => {
@@ -369,6 +437,74 @@ describe("POST /api/letters/review", () => {
       { severity: "ok", text: "Tone is appropriate." },
       { severity: "concern", text: "Doesn't mention the estimate expiry." },
     ]);
+  });
+
+  it("logs the review call's token usage", async () => {
+    const cookie = await sessionCookie();
+    const aiUsage: AiUsageRow[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => claudeResponse("OK: Fine.", { input_tokens: 30, output_tokens: 10 })),
+    );
+    const res = await app.request(
+      "/api/letters/review",
+      {
+        method: "POST",
+        headers: { Cookie: cookie },
+        body: JSON.stringify({ draftBody: "Dear {{CLIENT_NAME}}," }),
+      },
+      fakeEnv({ apiKey: API_KEY, aiModel: "claude-haiku-4-5", aiUsage }),
+    );
+    expect(res.status).toBe(200);
+    expect(aiUsage).toEqual([
+      { endpoint: "review", model: "claude-haiku-4-5", input_tokens: 30, output_tokens: 10 },
+    ]);
+  });
+});
+
+describe("GET /api/letters/usage", () => {
+  it("rejects a request with no session", async () => {
+    const res = await app.request("/api/letters/usage", {}, fakeEnv());
+    expect(res.status).toBe(401);
+  });
+
+  it("returns zeroed totals with no recorded usage", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request("/api/letters/usage", { headers: { Cookie: cookie } }, fakeEnv());
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      estimatedCostUsd: 0,
+      byModel: [],
+    });
+  });
+
+  it("sums usage per model and estimates cost from each model's published pricing", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters/usage",
+      { headers: { Cookie: cookie } },
+      fakeEnv({
+        aiUsage: [
+          { endpoint: "chat", model: "claude-haiku-4-5", input_tokens: 1_000_000, output_tokens: 1_000_000 },
+          { endpoint: "review", model: "claude-haiku-4-5", input_tokens: 1_000_000, output_tokens: 0 },
+          { endpoint: "chat", model: "claude-sonnet-5", input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        ],
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.totalInputTokens).toBe(3_000_000);
+    expect(body.totalOutputTokens).toBe(2_000_000);
+    // Haiku 4.5: 2M in * $1/MTok + 1M out * $5/MTok = $7. Sonnet 5: 1M in * $2/MTok + 1M out * $10/MTok = $12.
+    expect(body.estimatedCostUsd).toBeCloseTo(19, 5);
+    expect(body.byModel).toEqual(
+      expect.arrayContaining([
+        { model: "claude-haiku-4-5", inputTokens: 2_000_000, outputTokens: 1_000_000, estimatedCostUsd: 7 },
+        { model: "claude-sonnet-5", inputTokens: 1_000_000, outputTokens: 1_000_000, estimatedCostUsd: 12 },
+      ]),
+    );
   });
 });
 

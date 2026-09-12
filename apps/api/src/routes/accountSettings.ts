@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../index";
 import { requireAuth } from "./auth";
+import { AI_MODELS, DEFAULT_MODEL, isValidAiModel } from "../anthropic";
 
 const accountSettings = new Hono<AppEnv>();
 
@@ -36,16 +37,18 @@ function parseDisabledFeatures(stored: string): string[] {
 
 accountSettings.get("/", async (c) => {
   const row = await c.env.DB.prepare(
-    "SELECT invite_code, disabled_features, compliance_guidelines FROM account_settings WHERE id = 1",
+    "SELECT invite_code, disabled_features, compliance_guidelines, ai_model FROM account_settings WHERE id = 1",
   ).first<{
     invite_code: string;
     disabled_features: string;
     compliance_guidelines: string;
+    ai_model: string | null;
   }>();
   return c.json({
     inviteCode: row?.invite_code ?? "",
     disabledFeatures: parseDisabledFeatures(row?.disabled_features ?? "[]"),
     complianceGuidelines: row?.compliance_guidelines ?? "",
+    aiModel: row?.ai_model || DEFAULT_MODEL,
   });
 });
 
@@ -64,6 +67,23 @@ accountSettings.put("/compliance-guidelines", async (c) => {
     .run();
 
   return c.json({ complianceGuidelines: text });
+});
+
+// Applies to both of Correspondence's agents (drafting and review) --
+// see getAccountAiSettings in routes/letters.ts.
+accountSettings.put("/ai-model", async (c) => {
+  const { aiModel } = await c.req.json<{ aiModel?: string }>();
+  if (!isValidAiModel(aiModel)) {
+    return c.json({ error: `aiModel must be one of: ${AI_MODELS.map((m) => m.id).join(", ")}` }, 400);
+  }
+
+  await c.env.DB.prepare(
+    "INSERT INTO account_settings (id, ai_model) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET ai_model = excluded.ai_model",
+  )
+    .bind(aiModel)
+    .run();
+
+  return c.json({ aiModel });
 });
 
 accountSettings.put("/", async (c) => {

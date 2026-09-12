@@ -35,7 +35,7 @@ import {
 } from "./api";
 import { AppearanceManager } from "./AppearanceManager";
 import { ClientCategoryManager } from "./ClientCategoryManager";
-import { ComplianceGuidelinesPanel } from "./ComplianceGuidelinesPanel";
+import { AiSettingsPanel } from "./AiSettingsPanel";
 import { DocumentCategoryManager } from "./DocumentCategoryManager";
 import { FeatureManager } from "./FeatureManager";
 import { ExpenseCategoryManager } from "./ExpenseCategoryManager";
@@ -59,7 +59,7 @@ type AccountTab =
   | "appearance"
   | "features"
   | "deletedDocuments"
-  | "complianceGuidelines";
+  | "aiSettings";
 
 const SECTIONS: Array<{ key: Section; label: string }> = [
   { key: "categories", label: "Categories" },
@@ -89,7 +89,7 @@ const ACCOUNT_TABS: Array<{ key: AccountTab; label: string }> = [
   { key: "appearance", label: "Appearance" },
   { key: "features", label: "Features" },
   { key: "deletedDocuments", label: "Deleted documents" },
-  { key: "complianceGuidelines", label: "Compliance guidelines" },
+  { key: "aiSettings", label: "AI settings" },
 ];
 
 export function AdminPage({
@@ -201,7 +201,7 @@ export function AdminPage({
               {accountTab === "appearance" && <AppearanceManager />}
               {accountTab === "features" && <FeatureManager onChanged={onDisabledFeaturesChange} />}
               {accountTab === "deletedDocuments" && <DeletedDocumentsTab />}
-              {accountTab === "complianceGuidelines" && <ComplianceGuidelinesPanel />}
+              {accountTab === "aiSettings" && <AiSettingsPanel />}
             </>
           )}
         </div>
