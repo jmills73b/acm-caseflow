@@ -8,6 +8,7 @@ import { ExpensesPage } from "./ExpensesPage";
 import { Icon } from "./icons";
 import { InvoiceGeneratorPage } from "./InvoiceGeneratorPage";
 import { InvoicesPage } from "./InvoicesPage";
+import { LetterGeneratorPage } from "./LetterGeneratorPage";
 import { PerformancePage } from "./PerformancePage";
 import { TaskQuickPanel } from "./TaskQuickPanel";
 import { needsAttention } from "./taskUrgency";
@@ -153,6 +154,7 @@ export function SignedInApp({
       )}
       {screen.kind === "tasks" && <TasksPage onBack={goHome} />}
       {screen.kind === "documents" && <AllDocumentsPage onBack={goHome} />}
+      {screen.kind === "correspondence" && <LetterGeneratorPage onBack={goHome} />}
       {screen.kind === "admin" && (
         <AdminPage
           onBack={goHome}

@@ -15,6 +15,8 @@ import hourlyRates from "./routes/hourlyRates";
 import invoiceBatches from "./routes/invoiceBatches";
 import invoiceSettings from "./routes/invoiceSettings";
 import invoices from "./routes/invoices";
+import letterCategories from "./routes/letterCategories";
+import letters from "./routes/letters";
 import noteCategories from "./routes/noteCategories";
 import tasks from "./routes/tasks";
 import taxYearSettings from "./routes/taxYearSettings";
@@ -40,6 +42,10 @@ export interface Env {
   // itself as not configured rather than failing the whole app.
   CF_API_TOKEN?: string;
   CF_ACCOUNT_ID?: string;
+  // Optional, same pattern as DOCUMENT_ENCRYPTION_KEY: routes/letters.ts
+  // checks for this itself and reports drafting/review as unconfigured
+  // rather than failing, so it doesn't break every other route's tests.
+  ANTHROPIC_API_KEY?: string;
 }
 
 export type AppEnv = { Bindings: Env; Variables: { userId: number } };
@@ -74,6 +80,8 @@ app.route("/api/hourly-rates", hourlyRates);
 app.route("/api/invoices", invoices);
 app.route("/api/invoice-batches", invoiceBatches);
 app.route("/api/invoice-settings", invoiceSettings);
+app.route("/api/letter-categories", letterCategories);
+app.route("/api/letters", letters);
 app.route("/api/note-categories", noteCategories);
 app.route("/api/tasks", tasks);
 app.route("/api/tax-year-settings", taxYearSettings);

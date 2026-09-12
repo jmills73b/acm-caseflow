@@ -21,6 +21,11 @@ const FEATURES: Array<{ key: string; name: string; desc: string }> = [
     desc: "Track recurring and one-off things to do, with due dates and history.",
   },
   { key: "documents", name: "All Documents", desc: "Search every stored document across every client in one place." },
+  {
+    key: "correspondence",
+    name: "Correspondence",
+    desc: "Draft client letters with an AI reviewer for compliance and personal data.",
+  },
 ];
 
 export function FeatureManager({ onChanged }: { onChanged: (disabledFeatures: string[]) => void }) {

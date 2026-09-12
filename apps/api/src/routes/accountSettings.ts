@@ -22,6 +22,7 @@ const TOGGLEABLE_FEATURES = [
   "tax",
   "tasks",
   "documents",
+  "correspondence",
 ];
 
 function parseDisabledFeatures(stored: string): string[] {
@@ -34,14 +35,35 @@ function parseDisabledFeatures(stored: string): string[] {
 }
 
 accountSettings.get("/", async (c) => {
-  const row = await c.env.DB.prepare("SELECT invite_code, disabled_features FROM account_settings WHERE id = 1").first<{
+  const row = await c.env.DB.prepare(
+    "SELECT invite_code, disabled_features, compliance_guidelines FROM account_settings WHERE id = 1",
+  ).first<{
     invite_code: string;
     disabled_features: string;
+    compliance_guidelines: string;
   }>();
   return c.json({
     inviteCode: row?.invite_code ?? "",
     disabledFeatures: parseDisabledFeatures(row?.disabled_features ?? "[]"),
+    complianceGuidelines: row?.compliance_guidelines ?? "",
   });
+});
+
+// Fed into the Correspondence review agent's prompt (see routes/letters.ts)
+// -- kept admin-editable rather than hardcoded, since only the account
+// holder actually knows which regulatory framework applies to their
+// practice.
+accountSettings.put("/compliance-guidelines", async (c) => {
+  const { complianceGuidelines } = await c.req.json<{ complianceGuidelines?: string }>();
+  const text = complianceGuidelines ?? "";
+
+  await c.env.DB.prepare(
+    "INSERT INTO account_settings (id, compliance_guidelines) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET compliance_guidelines = excluded.compliance_guidelines",
+  )
+    .bind(text)
+    .run();
+
+  return c.json({ complianceGuidelines: text });
 });
 
 accountSettings.put("/", async (c) => {

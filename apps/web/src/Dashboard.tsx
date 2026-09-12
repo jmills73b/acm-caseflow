@@ -75,6 +75,13 @@ const TILES = [
     active: true,
   },
   {
+    key: "correspondence",
+    name: "Correspondence",
+    desc: "Draft client letters with an AI reviewer for compliance and personal data.",
+    icon: "mail",
+    active: true,
+  },
+  {
     key: "admin",
     name: "Admin & Settings",
     desc: "Manage categories, billing settings, and account tools for every function.",

@@ -111,6 +111,22 @@ jobs:
         env:
           DOCUMENT_ENCRYPTION_KEY: ${{ secrets.DOCUMENT_ENCRYPTION_KEY }}
 
+      # Correspondence's drafting/review agents (routes/letters.ts) call the
+      # Anthropic API directly, which needs its own key — same optional-
+      # binding pattern as DOCUMENT_ENCRYPTION_KEY above: until this secret
+      # is set, drafting/review report themselves as unconfigured (500)
+      # rather than breaking anything else in the app.
+      - name: Set Anthropic API key
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: apps/api
+          secrets: |
+            ANTHROPIC_API_KEY
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
       # Reuses the same deploy credentials already used above, rather than
       # asking for a new secret — the Usage panel just needs the Worker's
       # own copy of them to call Cloudflare's Analytics API at runtime.

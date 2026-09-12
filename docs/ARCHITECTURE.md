@@ -93,17 +93,18 @@ idempotent data imports from the spreadsheet this app replaces.
 | 0023 | `0023_documents.sql` | Adds `document_categories`, `documents` (R2 pointer, AES-GCM `iv`, soft delete). |
 | 0024 | `0024_client_fee_estimate.sql` | Adds `clients.fee_estimate`/`fee_estimate_note` (both nullable). |
 | 0025 | `0025_user_full_name.sql` | Adds `users.full_name` (nullable — the pre-existing account sets it later via `PATCH /api/me`). |
+| 0026 | `0026_correspondence.sql` | Adds `letter_categories`, `letters` (soft delete, like `documents`); adds `account_settings.compliance_guidelines`. |
 
-### Current tables (23)
+### Current tables (25)
 
 `users` · `clients` · `intermediary_firms` · `tax_year_settings` · `invoices` ·
 `expenses` · `expense_categories` · `invoice_settings` · `invoice_batches` ·
 `account_settings` · `time_categories` · `time_settings` · `hourly_rates` ·
 `time_entries` · `client_categories` · `client_category_links` · `note_categories` ·
 `client_notes` · `client_note_versions` · `tasks` · `task_occurrences` ·
-`document_categories` · `documents`
+`document_categories` · `documents` · `letter_categories` · `letters`
 
-`apps/api/src/routes/export.ts`'s `TABLES` constant covers 21 of these for account
+`apps/api/src/routes/export.ts`'s `TABLES` constant covers 23 of these for account
 data export — `users` and `account_settings` are deliberately excluded (credentials
 and app config, not business data).
 
@@ -130,6 +131,8 @@ system, just signed-in-or-not (see [Auth model](#auth-model)).
 | `/api/invoice-batches` | `invoiceBatches.ts` | `GET /`, `GET /:id`, `POST /`, `DELETE /:id` |
 | `/api/invoice-settings` | `invoiceSettings.ts` | `GET /`, `PUT /` |
 | `/api/invoices` | `invoices.ts` | `GET /`, `POST /`, `PATCH /:id`, `DELETE /:id` |
+| `/api/letter-categories` | `letterCategories.ts` | `GET /`, `POST /`, `PATCH /:id`, `DELETE /:id` |
+| `/api/letters` | `letters.ts` | `GET /`, `GET /deleted`, `POST /draft`, `POST /review`, `POST /`, `DELETE /:id` |
 | `/api/note-categories` | `noteCategories.ts` | `GET /`, `POST /`, `PATCH /:id`, `DELETE /:id` |
 | `/api/tasks` | `tasks.ts` | `GET /`, `GET /:id`, `POST /`, `PATCH /:id`, `POST /:id/actions` |
 | `/api/tax-year-settings` | `taxYearSettings.ts` | `GET /:startYear`, `POST /:startYear`, `POST /:startYear/split`, `PUT /:startYear/rates` |
@@ -165,6 +168,18 @@ Notable business logic worth knowing about, not obvious from the route list alon
   its billed total into the same figure as the first, unless the estimate is manually
   reset. A dedicated `matters` table would fix this but wasn't built; the client-level
   version was chosen as the smaller, well-precedented change.
+- **Correspondence** (`letters.ts`) never sends real personal data to the AI: guided
+  fields for anything identifying (name, address) are converted to placeholder tokens
+  (e.g. `{{CLIENT_NAME}}`) by the frontend before the request is even made, so
+  `POST /letters/draft`'s drafting-agent prompt only ever contains token names, not
+  values — there's no redaction step to get wrong, because the model is never given
+  anything to redact. `POST /letters/review` always runs a deterministic regex scan
+  (`packages/core`'s `scanForPii`) as a hard gate regardless of whether
+  `ANTHROPIC_API_KEY` is configured; the AI-based compliance/tone review layered on
+  top of that is advisory only (its flags are never a pass/fail gate) and reads its
+  ruleset from `account_settings.compliance_guidelines` — free text the account holder
+  maintains themselves, since only they know which regulatory framework actually
+  applies to their practice.
 
 ## Frontend
 
@@ -172,12 +187,14 @@ All `.tsx` files live flat in `apps/web/src/` (no subfolders). Roughly three kin
 
 - **Dashboard tile pages** — one per `Dashboard.tsx` tile (see below): `ClientsPage`,
   `TimeKeepingPage`, `InvoicesPage`, `PerformancePage`, `InvoiceGeneratorPage`,
-  `ExpensesPage`, `TaxPage`, `TasksPage`, `AllDocumentsPage`, `AdminPage`.
+  `ExpensesPage`, `TaxPage`, `TasksPage`, `AllDocumentsPage`, `LetterGeneratorPage`,
+  `AdminPage`.
 - **Admin sub-panels**, composed inside `AdminPage.tsx`'s rail nav (Categories /
   Billing / Account) — one `*Manager.tsx`/`*Panel.tsx` per manageable list or setting:
   `ClientCategoryManager`, `NoteCategoryManager`, `DocumentCategoryManager`,
   `ExpenseCategoryManager`, `TimeCategoryManager`, `TimeRateManager`,
-  `InvoiceSettingsManager`, `TaxRatesManager`, `FeatureManager`, `InviteCodePanel`,
+  `InvoiceSettingsManager`, `TaxRatesManager`, `LetterCategoryManager`,
+  `ComplianceGuidelinesPanel`, `FeatureManager`, `InviteCodePanel`, `ProfileManager`,
   `UsagePanel`, `AppearanceManager`.
 - **Shared components**: `Brand`, `ThemeQuickSwitch`, `TaskQuickPanel`,
   `DayOfWeekPicker`, `FollowUpPicker`, `MarkdownToolbar`, `icons` (the `<Icon />`
@@ -201,6 +218,7 @@ Client-scoped detail pages (`ClientNotesPage`, `ClientDocumentsPage`) are reache
 | `tax` | Tax & NI Estimate | Yes |
 | `tasks` | Tasks & Reminders | Yes |
 | `documents` | All Documents | Yes |
+| `correspondence` | Correspondence | Yes |
 | `admin` | Admin & Settings | No — where the toggle UI itself lives |
 
 ### Feature toggle system
@@ -427,10 +445,14 @@ API permission scope.
 
 `apps/api/wrangler.toml`: Worker `anita-invoice-tracker-api`, D1 binding `DB` →
 `anita-invoice-tracker`, R2 binding `DOCUMENTS` → `acm-caseflow-documents`. Secrets
-(`SESSION_SECRET`, `DOCUMENT_ENCRYPTION_KEY`, `CF_API_TOKEN`, `CF_ACCOUNT_ID`) are set
-via GitHub Actions at deploy time, not committed — all but `SESSION_SECRET` are
-optional on `Env` and degrade to a clear "not configured" 500 rather than breaking the
-app or its tests if unset.
+(`SESSION_SECRET`, `DOCUMENT_ENCRYPTION_KEY`, `CF_API_TOKEN`, `CF_ACCOUNT_ID`,
+`ANTHROPIC_API_KEY`) are set via GitHub Actions at deploy time, not committed — all
+but `SESSION_SECRET` are optional on `Env` and degrade to a clear "not configured" 500
+rather than breaking the app or its tests if unset. `ANTHROPIC_API_KEY` powers
+Correspondence's drafting/review agents (see `letters.ts` and the Correspondence
+bullet under [Notable business logic](#api-routes)) — get a key from
+console.anthropic.com and add it as a repo secret; there is a small per-letter cost
+once it's live, unlike everything else in this stack.
 
 `.github/workflows/ci.yml` — three jobs on every push/PR:
 
