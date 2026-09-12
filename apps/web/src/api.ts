@@ -392,6 +392,7 @@ export function deleteExpense(id: number): Promise<{ ok: boolean }> {
 export interface AccountSettings {
   inviteCode: string;
   disabledFeatures: string[];
+  complianceGuidelines: string;
 }
 
 export function getAccountSettings(): Promise<AccountSettings> {
@@ -404,6 +405,13 @@ export function updateAccountSettings(inviteCode: string): Promise<AccountSettin
 
 export function updateDisabledFeatures(disabledFeatures: string[]): Promise<{ disabledFeatures: string[] }> {
   return request("/api/account-settings/features", { method: "PUT", body: JSON.stringify({ disabledFeatures }) });
+}
+
+export function updateComplianceGuidelines(complianceGuidelines: string): Promise<{ complianceGuidelines: string }> {
+  return request("/api/account-settings/compliance-guidelines", {
+    method: "PUT",
+    body: JSON.stringify({ complianceGuidelines }),
+  });
 }
 
 export interface TimeSettings {
@@ -775,4 +783,123 @@ export function deleteDocument(id: number): Promise<{ ok: boolean }> {
 // navigation, which SameSite=Lax still allows.
 export function documentDownloadUrl(id: number): string {
   return `${API_URL}/api/documents/${id}/download`;
+}
+
+export interface LetterCategory {
+  id: number;
+  name: string;
+  draftingInstruction: string;
+}
+
+export function getLetterCategories(): Promise<LetterCategory[]> {
+  return request("/api/letter-categories");
+}
+
+export function addLetterCategory(name: string, draftingInstruction: string): Promise<LetterCategory> {
+  return request("/api/letter-categories", { method: "POST", body: JSON.stringify({ name, draftingInstruction }) });
+}
+
+export function updateLetterCategory(
+  id: number,
+  name: string,
+  draftingInstruction: string,
+): Promise<LetterCategory> {
+  return request(`/api/letter-categories/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name, draftingInstruction }),
+  });
+}
+
+export function deleteLetterCategory(id: number): Promise<{ ok: boolean }> {
+  return request(`/api/letter-categories/${id}`, { method: "DELETE" });
+}
+
+export interface ReviewFlag {
+  severity: "ok" | "concern";
+  text: string;
+}
+
+export interface PiiScanMatch {
+  kind: "email" | "phone" | "postcode" | "niNumber";
+  match: string;
+}
+
+export interface Letter {
+  id: number;
+  clientId: number;
+  clientName: string;
+  letterCategoryId: number | null;
+  categoryName: string | null;
+  amount: number | null;
+  reference: string | null;
+  keyDate: string | null;
+  tone: string | null;
+  personalFields: string[];
+  bespokeRequest: string | null;
+  draftBody: string;
+  reviewFlags: ReviewFlag[] | null;
+  piiScanClean: boolean | null;
+  createdByEmail: string;
+  createdAt: string;
+}
+
+export interface DeletedLetter extends Letter {
+  deletedAt: string;
+  deletedByEmail: string | null;
+}
+
+// clientId scopes the history to one client, which is how
+// LetterGeneratorPage.tsx always calls this -- omitting it is kept for
+// parity with getDocuments' all-clients mode, not currently used.
+export function getLetters(clientId?: number): Promise<Letter[]> {
+  return request(clientId !== undefined ? `/api/letters?clientId=${clientId}` : "/api/letters");
+}
+
+export function getDeletedLetters(): Promise<DeletedLetter[]> {
+  return request("/api/letters/deleted");
+}
+
+export interface DraftLetterInput {
+  clientId: number;
+  letterCategoryId?: number | null;
+  amount?: number | null;
+  reference?: string | null;
+  keyDate?: string | null;
+  tone?: string | null;
+  personalFields: string[];
+  bespokeRequest?: string | null;
+}
+
+// Never persisted server-side -- this is purely "ask the AI to draft
+// something," returning text for the caller to show, regenerate, or hand
+// edit before choosing to save it (addLetter below). See ARCHITECTURE.md's
+// Correspondence section for why personalFields carries only token names,
+// never real client data.
+export function draftLetter(input: DraftLetterInput): Promise<{ draftBody: string }> {
+  return request("/api/letters/draft", { method: "POST", body: JSON.stringify(input) });
+}
+
+export interface ReviewLetterResult {
+  piiScanClean: boolean;
+  piiMatches: PiiScanMatch[];
+  reviewConfigured: boolean;
+  flags: ReviewFlag[];
+}
+
+export function reviewLetter(draftBody: string): Promise<ReviewLetterResult> {
+  return request("/api/letters/review", { method: "POST", body: JSON.stringify({ draftBody }) });
+}
+
+export interface SaveLetterInput extends DraftLetterInput {
+  draftBody: string;
+  reviewFlags?: ReviewFlag[] | null;
+  piiScanClean?: boolean | null;
+}
+
+export function addLetter(input: SaveLetterInput): Promise<Letter> {
+  return request("/api/letters", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function deleteLetter(id: number): Promise<{ ok: boolean }> {
+  return request(`/api/letters/${id}`, { method: "DELETE" });
 }

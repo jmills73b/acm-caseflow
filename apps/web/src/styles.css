@@ -2046,3 +2046,91 @@ a.secondary:hover {
     padding: 16px 14px 40px;
   }
 }
+
+/* Correspondence: personal-data placeholder tokens and the compliance
+   review list. Dashed border on .token echoes the existing "not a real
+   value yet" convention already used for .status-in-progress/
+   .status-prospective's dashed border, rather than inventing a new visual
+   language for the same idea. */
+.token {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 12px;
+  padding: 2px 8px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 3px;
+  background: var(--paper-raised);
+  color: var(--ink-soft);
+  display: inline-block;
+}
+
+.panel-note {
+  font-size: 12.5px;
+  color: var(--ink-faint);
+  line-height: 1.5;
+  margin: -6px 0 20px 2px;
+  max-width: 58ch;
+}
+
+.token-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.token-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13.5px;
+  cursor: pointer;
+}
+
+.token-row input[type="checkbox"] {
+  accent-color: var(--ink);
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+
+.token-row .field-name {
+  color: var(--ink);
+  flex: none;
+  min-width: 150px;
+}
+
+.token-row .arrow {
+  color: var(--ink-faint);
+}
+
+/* No dedicated color for an "OK" review flag, same reasoning as the rest
+   of the app's status conventions -- only .warn (an existing token) marks
+   something worth a second look; everything else stays neutral ink. */
+.review-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.review-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+.review-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 6px;
+  background: var(--ink-faint);
+}
+
+.review-dot.warn {
+  background: var(--warn);
+}

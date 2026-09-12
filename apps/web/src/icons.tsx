@@ -26,6 +26,7 @@ export type IconName =
   | "tax"
   | "tasks"
   | "documents"
+  | "mail"
   | "admin"
   | "doc-file"
   | "download"
@@ -106,6 +107,12 @@ const PATHS: Record<IconName, JSX.Element> = {
     </>
   ),
   documents: <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />,
+  mail: (
+    <>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="M3 7l9 6 9-6" />
+    </>
+  ),
   admin: (
     <>
       <line x1="4" y1="6" x2="20" y2="6" />

@@ -10,9 +10,12 @@ async function sessionCookie(): Promise<string> {
   return `session=${token}`;
 }
 
-function fakeEnv(options: { inviteCode?: string; disabledFeatures?: string[] } = {}): Env {
+function fakeEnv(
+  options: { inviteCode?: string; disabledFeatures?: string[]; complianceGuidelines?: string } = {},
+): Env {
   let inviteCode = options.inviteCode ?? "";
   let disabledFeatures = JSON.stringify(options.disabledFeatures ?? []);
+  let complianceGuidelines = options.complianceGuidelines ?? "";
 
   return {
     SESSION_SECRET: SECRET,
@@ -24,7 +27,12 @@ function fakeEnv(options: { inviteCode?: string; disabledFeatures?: string[] } =
             boundArgs = args;
             return statement;
           },
-          first: async <T,>() => ({ invite_code: inviteCode, disabled_features: disabledFeatures }) as T,
+          first: async <T,>() =>
+            ({
+              invite_code: inviteCode,
+              disabled_features: disabledFeatures,
+              compliance_guidelines: complianceGuidelines,
+            }) as T,
           run: async () => {
             if (sql.includes("SET invite_code")) {
               const [newCode] = boundArgs as [string];
@@ -32,6 +40,9 @@ function fakeEnv(options: { inviteCode?: string; disabledFeatures?: string[] } =
             } else if (sql.includes("SET disabled_features")) {
               const [newFeatures] = boundArgs as [string];
               disabledFeatures = newFeatures;
+            } else if (sql.includes("SET compliance_guidelines")) {
+              const [newGuidelines] = boundArgs as [string];
+              complianceGuidelines = newGuidelines;
             }
             return { success: true, meta: {} };
           },
@@ -56,13 +67,13 @@ describe("GET /api/account-settings", () => {
       fakeEnv({ inviteCode: "LETMEIN", disabledFeatures: ["time"] }),
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ inviteCode: "LETMEIN", disabledFeatures: ["time"] });
+    expect(await res.json()).toEqual({ inviteCode: "LETMEIN", disabledFeatures: ["time"], complianceGuidelines: "" });
   });
 
   it("returns defaults when nothing has been set yet", async () => {
     const cookie = await sessionCookie();
     const res = await app.request("/api/account-settings", { headers: { Cookie: cookie } }, fakeEnv());
-    expect(await res.json()).toEqual({ inviteCode: "", disabledFeatures: [] });
+    expect(await res.json()).toEqual({ inviteCode: "", disabledFeatures: [], complianceGuidelines: "" });
   });
 });
 
@@ -165,5 +176,49 @@ describe("PUT /api/account-settings/features", () => {
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ disabledFeatures: [] });
+  });
+
+  it("accepts correspondence as a toggleable key", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/account-settings/features",
+      { method: "PUT", headers: { Cookie: cookie }, body: JSON.stringify({ disabledFeatures: ["correspondence"] }) },
+      fakeEnv(),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ disabledFeatures: ["correspondence"] });
+  });
+});
+
+describe("PUT /api/account-settings/compliance-guidelines", () => {
+  it("rejects a request with no session", async () => {
+    const res = await app.request("/api/account-settings/compliance-guidelines", { method: "PUT" }, fakeEnv());
+    expect(res.status).toBe(401);
+  });
+
+  it("saves new compliance guidelines text", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/account-settings/compliance-guidelines",
+      {
+        method: "PUT",
+        headers: { Cookie: cookie },
+        body: JSON.stringify({ complianceGuidelines: "Always state GDPR data-minimisation principles." }),
+      },
+      fakeEnv({ complianceGuidelines: "old text" }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ complianceGuidelines: "Always state GDPR data-minimisation principles." });
+  });
+
+  it("accepts clearing the guidelines to an empty string", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/account-settings/compliance-guidelines",
+      { method: "PUT", headers: { Cookie: cookie }, body: JSON.stringify({}) },
+      fakeEnv({ complianceGuidelines: "old text" }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ complianceGuidelines: "" });
   });
 });

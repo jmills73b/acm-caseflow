@@ -30,3 +30,5 @@ export {
   WEEKDAY_LABELS,
 } from "./taskRecurrence";
 export type { TaskFrequency } from "./taskRecurrence";
+export { scanForPii } from "./piiScan";
+export type { PiiScanMatch, PiiScanResult } from "./piiScan";

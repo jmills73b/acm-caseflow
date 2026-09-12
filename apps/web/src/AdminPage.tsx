@@ -13,6 +13,7 @@ import {
   getFirms,
   getHourlyRates,
   getInvoiceSettings,
+  getLetterCategories,
   getNoteCategories,
   getTaxYearSettings,
   getTimeCategories,
@@ -28,6 +29,7 @@ import {
   type Firm,
   type HourlyRate,
   type InvoiceSettings,
+  type LetterCategory,
   type NoteCategory,
   type TimeCategory,
   type TimeEntry,
@@ -35,9 +37,11 @@ import {
 } from "./api";
 import { AppearanceManager } from "./AppearanceManager";
 import { ClientCategoryManager } from "./ClientCategoryManager";
+import { ComplianceGuidelinesPanel } from "./ComplianceGuidelinesPanel";
 import { DocumentCategoryManager } from "./DocumentCategoryManager";
 import { FeatureManager } from "./FeatureManager";
 import { ExpenseCategoryManager } from "./ExpenseCategoryManager";
+import { LetterCategoryManager } from "./LetterCategoryManager";
 import { TimeCategoryManager } from "./TimeCategoryManager";
 import { TimeRateManager } from "./TimeRateManager";
 import { NoteCategoryManager } from "./NoteCategoryManager";
@@ -48,9 +52,17 @@ import { ProfileManager } from "./ProfileManager";
 import { UsagePanel } from "./UsagePanel";
 
 type Section = "categories" | "billing" | "account";
-type CategoriesTab = "clients" | "expenses" | "time" | "notes" | "documents";
+type CategoriesTab = "clients" | "expenses" | "time" | "notes" | "documents" | "letters";
 type BillingTab = "rates" | "invoice" | "tax";
-type AccountTab = "profile" | "invite" | "export" | "usage" | "appearance" | "features" | "deletedDocuments";
+type AccountTab =
+  | "profile"
+  | "invite"
+  | "export"
+  | "usage"
+  | "appearance"
+  | "features"
+  | "deletedDocuments"
+  | "complianceGuidelines";
 
 const SECTIONS: Array<{ key: Section; label: string }> = [
   { key: "categories", label: "Categories" },
@@ -64,6 +76,7 @@ const CATEGORIES_TABS: Array<{ key: CategoriesTab; label: string }> = [
   { key: "time", label: "Time" },
   { key: "notes", label: "Notes" },
   { key: "documents", label: "Documents" },
+  { key: "letters", label: "Letters" },
 ];
 
 const BILLING_TABS: Array<{ key: BillingTab; label: string }> = [
@@ -80,6 +93,7 @@ const ACCOUNT_TABS: Array<{ key: AccountTab; label: string }> = [
   { key: "appearance", label: "Appearance" },
   { key: "features", label: "Features" },
   { key: "deletedDocuments", label: "Deleted documents" },
+  { key: "complianceGuidelines", label: "Compliance guidelines" },
 ];
 
 export function AdminPage({
@@ -141,6 +155,7 @@ export function AdminPage({
               {categoriesTab === "time" && <TimeCategoriesTab />}
               {categoriesTab === "notes" && <NoteCategoriesTab />}
               {categoriesTab === "documents" && <DocumentCategoriesTab />}
+              {categoriesTab === "letters" && <LetterCategoriesTab />}
             </>
           )}
 
@@ -191,6 +206,7 @@ export function AdminPage({
               {accountTab === "appearance" && <AppearanceManager />}
               {accountTab === "features" && <FeatureManager onChanged={onDisabledFeaturesChange} />}
               {accountTab === "deletedDocuments" && <DeletedDocumentsTab />}
+              {accountTab === "complianceGuidelines" && <ComplianceGuidelinesPanel />}
             </>
           )}
         </div>
@@ -354,6 +370,35 @@ function DocumentCategoriesTab() {
     </p>
   );
   return <DocumentCategoryManager categories={categories} onChanged={refresh} />;
+}
+
+function LetterCategoriesTab() {
+  const [categories, setCategories] = useState<LetterCategory[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  async function refresh() {
+    setLoading(true);
+    try {
+      setCategories(await getLetterCategories());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't load letter types");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  if (loading) return <p className="loading">Loading…</p>;
+  if (error) return (
+    <p className="error" role="alert">
+      {error}
+    </p>
+  );
+  return <LetterCategoryManager categories={categories} onChanged={refresh} />;
 }
 
 // The audit trail for story 11.1's soft-delete requirement: every deleted
