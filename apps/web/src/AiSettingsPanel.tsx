@@ -73,8 +73,8 @@ export function AiSettingsPanel() {
       <div className="edit-panel" style={{ marginBottom: 24 }}>
         <p className="edit-panel-title">Model</p>
         <p className="hint">
-          Used by both of Correspondence's agents — drafting and compliance review. A more capable model costs more
-          per letter; see Usage below for what this has spent so far.
+          Used by both of Correspondence's agents — drafting and the supervising-solicitor-style review. A more
+          capable model costs more per letter; see Usage below for what this has spent so far.
         </p>
         <label className="edit-field" style={{ marginBottom: 16 }}>
           <span>Model</span>

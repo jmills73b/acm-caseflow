@@ -402,6 +402,20 @@ describe("POST /api/letters/chat", () => {
     expect(sentBody.system).toContain("Subject:");
   });
 
+  it("instructs the drafting agent to analyse before drafting", async () => {
+    const cookie = await sessionCookie();
+    const fetchMock = vi.fn(async () => claudeResponse("Dear {{CLIENT_NAME}},"));
+    vi.stubGlobal("fetch", fetchMock);
+    await app.request(
+      "/api/letters/chat",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify(validBody) },
+      fakeEnv({ apiKey: API_KEY }),
+    );
+    const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(sentBody.system).toContain("legal issues raised");
+    expect(sentBody.system).toContain("Don't include this analysis in your reply");
+  });
+
   it("logs the call's token usage against the model used", async () => {
     const cookie = await sessionCookie();
     const aiUsage: AiUsageRow[] = [];
@@ -487,6 +501,46 @@ describe("POST /api/letters/review", () => {
       { severity: "ok", text: "Tone is appropriate." },
       { severity: "concern", text: "Doesn't mention the estimate expiry." },
     ]);
+  });
+
+  it("includes the drafting conversation in the reviewer's system prompt when provided", async () => {
+    const cookie = await sessionCookie();
+    const fetchMock = vi.fn(async () => claudeResponse("OK: Fine."));
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await app.request(
+      "/api/letters/review",
+      {
+        method: "POST",
+        headers: { Cookie: cookie },
+        body: JSON.stringify({
+          draftBody: "Dear {{CLIENT_NAME}}, the estimate is £500.",
+          messages: [
+            { role: "user", content: "I need to write: fee estimate letter" },
+            { role: "assistant", content: "What's the estimate amount?" },
+            { role: "user", content: "£450" },
+          ],
+        }),
+      },
+      fakeEnv({ apiKey: API_KEY }),
+    );
+    expect(res.status).toBe(200);
+    const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(sentBody.system).toContain("supervising solicitor");
+    expect(sentBody.system).toContain("Drafting conversation:");
+    expect(sentBody.system).toContain("£450");
+  });
+
+  it("tells the reviewer no conversation was provided when messages are omitted", async () => {
+    const cookie = await sessionCookie();
+    const fetchMock = vi.fn(async () => claudeResponse("OK: Fine."));
+    vi.stubGlobal("fetch", fetchMock);
+    await app.request(
+      "/api/letters/review",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ draftBody: "Dear {{CLIENT_NAME}}," }) },
+      fakeEnv({ apiKey: API_KEY }),
+    );
+    const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(sentBody.system).toContain("No drafting conversation was provided");
   });
 
   it("logs the review call's token usage", async () => {

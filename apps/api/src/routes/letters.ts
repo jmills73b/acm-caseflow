@@ -157,7 +157,10 @@ interface ChatRequest {
   messages?: ChatMessage[];
 }
 
-function isValidMessages(messages: unknown): messages is ChatMessage[] {
+// Shared shape check; /chat additionally requires the last turn to be the
+// user's (it's about to get a reply), which doesn't hold for /review's use
+// -- the conversation it's handed normally ends with the assistant's draft.
+function isValidConversation(messages: unknown): messages is ChatMessage[] {
   return (
     Array.isArray(messages) &&
     messages.length > 0 &&
@@ -168,9 +171,12 @@ function isValidMessages(messages: unknown): messages is ChatMessage[] {
         (m.role === "user" || m.role === "assistant") &&
         typeof m.content === "string" &&
         m.content.trim().length > 0,
-    ) &&
-    messages[messages.length - 1].role === "user"
+    )
   );
+}
+
+function isValidMessages(messages: unknown): messages is ChatMessage[] {
+  return isValidConversation(messages) && messages[messages.length - 1].role === "user";
 }
 
 // Stateless by design: the conversation lives in the browser (see
@@ -217,12 +223,17 @@ letters.post("/chat", async (c) => {
       : "You are drafting a piece of business correspondence for a UK family-law costs consultancy, through a " +
         "back-and-forth conversation with the person you're drafting it for.",
     `The letter's purpose, as described by the user: ${letterType}`,
+    "Before drafting, work through this for yourself: the relevant facts established so far in the conversation, " +
+      "what the client is trying to achieve, the legal issues raised, any applicable UK law or professional-" +
+      "conduct principles worth bearing in mind, your recommended position, and anything uncertain or missing " +
+      "that you'd need before drafting responsibly. Don't include this analysis in your reply -- it should only " +
+      "inform how you draft.",
     "You must use ONLY the following literal placeholder tokens for any personal or identifying information " +
       "(a name, address, or similar) -- never invent, guess, or fill in a real value of your own, even if it " +
       "would make the letter read more naturally:",
     tokens.length > 0 ? tokens.join(", ") : "(no personal-data tokens were made available for this letter)",
-    "If you need more information before producing a useful draft, ask a single concise clarifying question and " +
-      "do not include a draft in that reply.",
+    "If your analysis turned up anything uncertain or missing, ask a single concise clarifying question instead " +
+      "of drafting -- do not include a draft in that reply.",
     format === "email"
       ? "Otherwise, respond with ONLY the full email, incorporating everything discussed so far -- start with a " +
         "single line 'Subject: ...' summarising it, then a blank line, then the email body with a concise " +
@@ -242,16 +253,28 @@ letters.post("/chat", async (c) => {
 
 interface ReviewRequest {
   draftBody?: string;
+  // The drafting conversation the draft came from -- optional (a review of
+  // an old saved letter with no conversation to hand still works, just
+  // without the facts-comparison checks below), but the live UI always has
+  // it and always sends it, since it's the reviewer's only source of what
+  // was actually discussed.
+  messages?: ChatMessage[];
+}
+
+function renderConversation(messages: ChatMessage[]): string {
+  return messages.map((m) => `${m.role === "user" ? "User" : "Drafting agent"}: ${m.content}`).join("\n\n");
 }
 
 // The PII pattern scan always runs, with or without an API key -- it's
 // plain regex (packages/core's scanForPii), not an AI call, and is the one
 // hard gate in this feature (see docs/ARCHITECTURE.md). The advisory
-// compliance/tone review is a second, separate concern layered on top: it
-// needs the API key, and its output is never treated as a pass/fail --
-// only the human reading it decides what to do with a flag.
+// review layered on top plays supervising solicitor: checking the draft
+// against what was actually discussed (factual/legal accuracy, invented
+// content, argument strength, omissions, exploitability, tone) as well as
+// the firm's own compliance guidelines. Its output is never treated as a
+// pass/fail -- only the human reading it decides what to do with a flag.
 letters.post("/review", async (c) => {
-  const { draftBody } = await c.req.json<ReviewRequest>();
+  const { draftBody, messages } = await c.req.json<ReviewRequest>();
   if (!draftBody) {
     return c.json({ error: "draftBody is required" }, 400);
   }
@@ -265,18 +288,33 @@ letters.post("/review", async (c) => {
   const { model, complianceGuidelines: guidelines } = await getAccountAiSettings(c.env.DB);
 
   const system = [
-    "You review draft client correspondence for a UK family-law costs consultancy against the firm's own " +
-      "compliance guidelines below. You do not rewrite the letter, and you never declare it definitively " +
-      "compliant with any law -- you flag things worth a human's attention and let them decide.",
+    "You are a supervising solicitor at a UK family-law costs consultancy, reviewing a colleague's draft client " +
+      "correspondence before it goes out. You do not rewrite the letter yourself -- you flag things worth a " +
+      "human's attention, and propose a specific correction for each -- and you never declare it definitively " +
+      "compliant with any law.",
+    "Check the draft against the drafting conversation below, which is the only record of what was actually " +
+      "discussed and agreed, for: factual accuracy (does the letter match what was actually said, and has " +
+      "anything been invented or embellished beyond it?), legal accuracy, whether any argument is pitched too " +
+      "strongly or too weakly for what the facts support, tone and professionalism, anything materially omitted " +
+      "that the recipient would expect to see, and anything the recipient could exploit against the firm or " +
+      "client if the letter were sent as written.",
+    isValidConversation(messages)
+      ? `Drafting conversation:\n${renderConversation(messages)}`
+      : "(No drafting conversation was provided -- review the letter on its own terms, and treat every factual " +
+        "claim in it as unverifiable rather than assuming it's accurate.)",
     "Do not comment on whether the letter contains personal data -- that is checked separately.",
     "Respond with exactly one item per line. Each line must start with either 'OK:' (something you checked and " +
-      "found no issue with) or 'CONCERN:' (something worth a second look). No other text before or after.",
-    guidelines ? `Compliance guidelines:\n${guidelines}` : "No specific compliance guidelines have been set yet -- review only for professional tone and clarity.",
+      "found no issue with) or 'CONCERN:' (something worth a second look, with your proposed correction). Prefix " +
+      "each line's message with a short bracketed category, e.g. '[Factual accuracy]', '[Tone]', '[Omission]', " +
+      "'[Compliance]'. No other text before or after.",
+    guidelines
+      ? `Also check against the firm's own compliance guidelines:\n${guidelines}`
+      : "No specific compliance guidelines have been set yet.",
   ].join("\n\n");
 
   try {
     const { text: raw, usage } = await callClaude(c.env.ANTHROPIC_API_KEY, model, system, [
-      { role: "user", content: draftBody },
+      { role: "user", content: `Review this draft:\n\n${draftBody}` },
     ]);
     await logAiUsage(c.env.DB, "review", model, usage);
     const flags: ReviewFlag[] = raw
