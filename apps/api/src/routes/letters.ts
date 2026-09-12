@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { scanForPii } from "@acm-caseflow/core";
 import type { AppEnv } from "../index";
 import { requireAuth } from "./auth";
-import { callClaude } from "../anthropic";
+import { callClaude, type ChatMessage } from "../anthropic";
 
 const letters = new Hono<AppEnv>();
 
@@ -12,14 +12,8 @@ interface LetterRow {
   id: number;
   client_id: number;
   client_name: string;
-  letter_category_id: number | null;
-  category_name: string | null;
-  amount: number | null;
-  reference: string | null;
-  key_date: string | null;
-  tone: string | null;
+  letter_type: string | null;
   personal_fields: string;
-  bespoke_request: string | null;
   draft_body: string;
   review_flags: string | null;
   pii_scan_clean: number | null;
@@ -37,14 +31,8 @@ function toLetter(row: LetterRow) {
     id: row.id,
     clientId: row.client_id,
     clientName: row.client_name,
-    letterCategoryId: row.letter_category_id,
-    categoryName: row.category_name,
-    amount: row.amount,
-    reference: row.reference,
-    keyDate: row.key_date,
-    tone: row.tone,
+    letterType: row.letter_type,
     personalFields: JSON.parse(row.personal_fields) as string[],
-    bespokeRequest: row.bespoke_request,
     draftBody: row.draft_body,
     reviewFlags: row.review_flags ? (JSON.parse(row.review_flags) as ReviewFlag[]) : null,
     piiScanClean: row.pii_scan_clean === null ? null : row.pii_scan_clean === 1,
@@ -54,16 +42,11 @@ function toLetter(row: LetterRow) {
 }
 
 const LIST_COLUMNS =
-  "letters.id, letters.client_id, clients.name AS client_name, letters.letter_category_id, " +
-  "letter_categories.name AS category_name, letters.amount, letters.reference, letters.key_date, letters.tone, " +
-  "letters.personal_fields, letters.bespoke_request, letters.draft_body, letters.review_flags, " +
+  "letters.id, letters.client_id, clients.name AS client_name, letters.letter_type, " +
+  "letters.personal_fields, letters.draft_body, letters.review_flags, " +
   "letters.pii_scan_clean, users.email AS created_by_email, letters.created_at";
 
-const LIST_JOIN =
-  "FROM letters " +
-  "JOIN clients ON clients.id = letters.client_id " +
-  "LEFT JOIN letter_categories ON letter_categories.id = letters.letter_category_id " +
-  "JOIN users ON users.id = letters.created_by";
+const LIST_JOIN = "FROM letters JOIN clients ON clients.id = letters.client_id JOIN users ON users.id = letters.created_by";
 
 // clientId is optional, same convention as documents.ts: a client's own
 // Correspondence history passes it, while a future all-clients view could
@@ -104,75 +87,79 @@ letters.get("/deleted", async (c) => {
   );
 });
 
-interface DraftRequest {
-  clientId?: number;
-  letterCategoryId?: number;
-  amount?: number;
-  reference?: string;
-  keyDate?: string;
-  tone?: string;
+interface ChatRequest {
+  letterType?: string;
   personalFields?: string[];
-  bespokeRequest?: string;
+  messages?: ChatMessage[];
 }
 
-// Drafts are never persisted here -- this only ever returns text for the
-// frontend to show and let the user regenerate or edit before choosing to
-// save it (POST / below). Critically, the only personal-data inputs this
-// endpoint ever receives are the *names* of placeholder tokens
-// (personalFields, e.g. "CLIENT_NAME") -- never a client's real name,
-// address, or any other identifying value. The model is told to use those
-// tokens verbatim and invent nothing else, which is what makes "no real
-// PII ever reaches the AI" a structural guarantee rather than a prompt-
-// level request it could ignore.
-letters.post("/draft", async (c) => {
+function isValidMessages(messages: unknown): messages is ChatMessage[] {
+  return (
+    Array.isArray(messages) &&
+    messages.length > 0 &&
+    messages.every(
+      (m): m is ChatMessage =>
+        typeof m === "object" &&
+        m !== null &&
+        (m.role === "user" || m.role === "assistant") &&
+        typeof m.content === "string" &&
+        m.content.trim().length > 0,
+    ) &&
+    messages[messages.length - 1].role === "user"
+  );
+}
+
+// Stateless by design: the conversation lives in the browser (see
+// LetterGeneratorPage.tsx), which resends the whole message history on
+// every turn -- nothing about a letter's drafting conversation is
+// persisted server-side, only the final accepted draft (POST / below).
+//
+// The only personal-data input this endpoint ever receives is the *names*
+// of placeholder tokens (personalFields, e.g. "CLIENT_NAME") -- never a
+// client's real name, address, or any other identifying value. The system
+// prompt is rebuilt fresh on every call from letterType/personalFields, so
+// that rule is enforced across the whole conversation, not just the first
+// turn. The model is told to use those tokens verbatim and invent nothing
+// else, which is what makes "no real PII ever reaches the AI" a structural
+// guarantee rather than a prompt-level request it could ignore. What the
+// user themselves types into the conversation is their own free text, no
+// different a trust boundary than any other text box in this app.
+letters.post("/chat", async (c) => {
   if (!c.env.ANTHROPIC_API_KEY) {
     return c.json({ error: "AI letter drafting is not configured" }, 500);
   }
 
-  const body = await c.req.json<DraftRequest>();
-  const personalFields = Array.isArray(body.personalFields) ? body.personalFields : [];
-
-  let draftingInstruction = "";
-  if (body.letterCategoryId) {
-    const category = await c.env.DB.prepare("SELECT drafting_instruction FROM letter_categories WHERE id = ?")
-      .bind(body.letterCategoryId)
-      .first<{ drafting_instruction: string }>();
-    draftingInstruction = category?.drafting_instruction ?? "";
+  const body = await c.req.json<ChatRequest>();
+  const letterType = body.letterType?.trim();
+  if (!letterType) {
+    return c.json({ error: "letterType is required" }, 400);
+  }
+  if (!isValidMessages(body.messages)) {
+    return c.json({ error: "messages must be a non-empty list ending with a user message" }, 400);
   }
 
+  const personalFields = Array.isArray(body.personalFields) ? body.personalFields : [];
   const tokens = personalFields.map((field) => `{{${field}}}`);
-  const facts: string[] = [];
-  if (body.amount !== undefined) facts.push(`Amount: £${body.amount.toFixed(2)}`);
-  if (body.reference) facts.push(`Reference: ${body.reference}`);
-  if (body.keyDate) facts.push(`Key date: ${body.keyDate}`);
-  if (body.tone) facts.push(`Tone: ${body.tone}`);
 
   const system = [
-    "You draft business correspondence for a UK family-law costs consultancy.",
+    "You are drafting a piece of business correspondence for a UK family-law costs consultancy, through a " +
+      "back-and-forth conversation with the person you're drafting it for.",
+    `The letter's purpose, as described by the user: ${letterType}`,
     "You must use ONLY the following literal placeholder tokens for any personal or identifying information " +
       "(a name, address, or similar) -- never invent, guess, or fill in a real value of your own, even if it " +
       "would make the letter read more naturally:",
-    tokens.length > 0 ? tokens.join(", ") : "(no personal-data tokens were requested for this letter)",
-    "State every factual figure and date exactly as given below -- never calculate, round, or restate them " +
-      "differently.",
-    "Respond with only the letter body text. No subject-line prefix, no commentary, no markdown formatting.",
+    tokens.length > 0 ? tokens.join(", ") : "(no personal-data tokens were made available for this letter)",
+    "If you need more information before producing a useful draft, ask a single concise clarifying question and " +
+      "do not include a draft in that reply.",
+    "Otherwise, respond with ONLY the full letter body, incorporating everything discussed so far -- no preamble " +
+      "like 'Here's a draft', no commentary, no markdown formatting.",
   ].join("\n\n");
 
-  const user = [
-    draftingInstruction && `House style for this letter type: ${draftingInstruction}`,
-    facts.length > 0 && `Facts to include:\n${facts.join("\n")}`,
-    `Personal-data placeholders available: ${tokens.join(", ") || "none"}`,
-    body.bespokeRequest && `Additional instructions: ${body.bespokeRequest}`,
-    "Draft the letter now.",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-
   try {
-    const draftBody = await callClaude(c.env.ANTHROPIC_API_KEY, system, user);
-    return c.json({ draftBody });
+    const reply = await callClaude(c.env.ANTHROPIC_API_KEY, system, body.messages);
+    return c.json({ reply });
   } catch (err) {
-    return c.json({ error: err instanceof Error ? err.message : "Could not draft the letter" }, 502);
+    return c.json({ error: err instanceof Error ? err.message : "Could not reach the drafting agent" }, 502);
   }
 });
 
@@ -214,7 +201,7 @@ letters.post("/review", async (c) => {
   ].join("\n\n");
 
   try {
-    const raw = await callClaude(c.env.ANTHROPIC_API_KEY, system, draftBody);
+    const raw = await callClaude(c.env.ANTHROPIC_API_KEY, system, [{ role: "user", content: draftBody }]);
     const flags: ReviewFlag[] = raw
       .split("\n")
       .map((line) => line.trim())
@@ -237,13 +224,8 @@ letters.post("/review", async (c) => {
 
 interface SaveRequest {
   clientId?: number;
-  letterCategoryId?: number | null;
-  amount?: number | null;
-  reference?: string | null;
-  keyDate?: string | null;
-  tone?: string | null;
+  letterType?: string | null;
   personalFields?: string[];
-  bespokeRequest?: string | null;
   draftBody?: string;
   reviewFlags?: ReviewFlag[] | null;
   piiScanClean?: boolean | null;
@@ -266,21 +248,14 @@ letters.post("/", async (c) => {
   }
 
   const created = await c.env.DB.prepare(
-    `INSERT INTO letters
-       (client_id, letter_category_id, amount, reference, key_date, tone, personal_fields, bespoke_request,
-        draft_body, review_flags, pii_scan_clean, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO letters (client_id, letter_type, personal_fields, draft_body, review_flags, pii_scan_clean, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      RETURNING id`,
   )
     .bind(
       body.clientId,
-      body.letterCategoryId ?? null,
-      body.amount ?? null,
-      body.reference ?? null,
-      body.keyDate ?? null,
-      body.tone ?? null,
+      body.letterType ?? null,
       JSON.stringify(body.personalFields ?? []),
-      body.bespokeRequest ?? null,
       body.draftBody,
       body.reviewFlags ? JSON.stringify(body.reviewFlags) : null,
       body.piiScanClean === undefined || body.piiScanClean === null ? null : body.piiScanClean ? 1 : 0,

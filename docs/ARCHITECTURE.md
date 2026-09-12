@@ -94,17 +94,18 @@ idempotent data imports from the spreadsheet this app replaces.
 | 0024 | `0024_client_fee_estimate.sql` | Adds `clients.fee_estimate`/`fee_estimate_note` (both nullable). |
 | 0025 | `0025_user_full_name.sql` | Adds `users.full_name` (nullable — the pre-existing account sets it later via `PATCH /api/me`). |
 | 0026 | `0026_correspondence.sql` | Adds `letter_categories`, `letters` (soft delete, like `documents`); adds `account_settings.compliance_guidelines`. |
+| 0027 | `0027_correspondence_chat_redesign.sql` | Drops `letter_categories` and `letters`' `letter_category_id`/`amount`/`reference`/`key_date`/`tone`/`bespoke_request` columns; adds `letters.letter_type` (free text). Letter type and every fact/tone detail moved into the drafting conversation itself — no production data depended on the dropped columns yet. |
 
-### Current tables (25)
+### Current tables (24)
 
 `users` · `clients` · `intermediary_firms` · `tax_year_settings` · `invoices` ·
 `expenses` · `expense_categories` · `invoice_settings` · `invoice_batches` ·
 `account_settings` · `time_categories` · `time_settings` · `hourly_rates` ·
 `time_entries` · `client_categories` · `client_category_links` · `note_categories` ·
 `client_notes` · `client_note_versions` · `tasks` · `task_occurrences` ·
-`document_categories` · `documents` · `letter_categories` · `letters`
+`document_categories` · `documents` · `letters`
 
-`apps/api/src/routes/export.ts`'s `TABLES` constant covers 23 of these for account
+`apps/api/src/routes/export.ts`'s `TABLES` constant covers 22 of these for account
 data export — `users` and `account_settings` are deliberately excluded (credentials
 and app config, not business data).
 
@@ -131,8 +132,7 @@ system, just signed-in-or-not (see [Auth model](#auth-model)).
 | `/api/invoice-batches` | `invoiceBatches.ts` | `GET /`, `GET /:id`, `POST /`, `DELETE /:id` |
 | `/api/invoice-settings` | `invoiceSettings.ts` | `GET /`, `PUT /` |
 | `/api/invoices` | `invoices.ts` | `GET /`, `POST /`, `PATCH /:id`, `DELETE /:id` |
-| `/api/letter-categories` | `letterCategories.ts` | `GET /`, `POST /`, `PATCH /:id`, `DELETE /:id` |
-| `/api/letters` | `letters.ts` | `GET /`, `GET /deleted`, `POST /draft`, `POST /review`, `POST /`, `DELETE /:id` |
+| `/api/letters` | `letters.ts` | `GET /`, `GET /deleted`, `POST /chat`, `POST /review`, `POST /`, `DELETE /:id` |
 | `/api/note-categories` | `noteCategories.ts` | `GET /`, `POST /`, `PATCH /:id`, `DELETE /:id` |
 | `/api/tasks` | `tasks.ts` | `GET /`, `GET /:id`, `POST /`, `PATCH /:id`, `POST /:id/actions` |
 | `/api/tax-year-settings` | `taxYearSettings.ts` | `GET /:startYear`, `POST /:startYear`, `POST /:startYear/split`, `PUT /:startYear/rates` |
@@ -168,11 +168,18 @@ Notable business logic worth knowing about, not obvious from the route list alon
   its billed total into the same figure as the first, unless the estimate is manually
   reset. A dedicated `matters` table would fix this but wasn't built; the client-level
   version was chosen as the smaller, well-precedented change.
-- **Correspondence** (`letters.ts`) never sends real personal data to the AI: guided
+- **Correspondence** (`letters.ts`) drafts a letter through an open-ended conversation
+  with the drafting agent (`POST /letters/chat`) rather than a single-shot generate:
+  the letter type is free text, and every fact/tone detail is discussed in the
+  conversation itself. The chat endpoint is stateless — the frontend
+  (`LetterGeneratorPage.tsx`) holds the full message history and resends it on every
+  turn; nothing about the conversation is persisted server-side, only the final
+  accepted draft. The one thing that *isn't* conversational is personal data: guided
   fields for anything identifying (name, address) are converted to placeholder tokens
-  (e.g. `{{CLIENT_NAME}}`) by the frontend before the request is even made, so
-  `POST /letters/draft`'s drafting-agent prompt only ever contains token names, not
-  values — there's no redaction step to get wrong, because the model is never given
+  (e.g. `{{CLIENT_NAME}}`) before the conversation starts, and that token list is baked
+  into the system prompt fresh on every call — so the drafting agent's prompt only
+  ever contains token names, not values, for the whole conversation, not just the
+  first turn. There's no redaction step to get wrong, because the model is never given
   anything to redact. `POST /letters/review` always runs a deterministic regex scan
   (`packages/core`'s `scanForPii`) as a hard gate regardless of whether
   `ANTHROPIC_API_KEY` is configured; the AI-based compliance/tone review layered on
@@ -193,9 +200,9 @@ All `.tsx` files live flat in `apps/web/src/` (no subfolders). Roughly three kin
   Billing / Account) — one `*Manager.tsx`/`*Panel.tsx` per manageable list or setting:
   `ClientCategoryManager`, `NoteCategoryManager`, `DocumentCategoryManager`,
   `ExpenseCategoryManager`, `TimeCategoryManager`, `TimeRateManager`,
-  `InvoiceSettingsManager`, `TaxRatesManager`, `LetterCategoryManager`,
-  `ComplianceGuidelinesPanel`, `FeatureManager`, `InviteCodePanel`, `ProfileManager`,
-  `UsagePanel`, `AppearanceManager`.
+  `InvoiceSettingsManager`, `TaxRatesManager`, `ComplianceGuidelinesPanel`,
+  `FeatureManager`, `InviteCodePanel`, `ProfileManager`, `UsagePanel`,
+  `AppearanceManager`.
 - **Shared components**: `Brand`, `ThemeQuickSwitch`, `TaskQuickPanel`,
   `DayOfWeekPicker`, `FollowUpPicker`, `MarkdownToolbar`, `icons` (the `<Icon />`
   component and its `IconName` union — see [Icon system](#icon-system)). Plus

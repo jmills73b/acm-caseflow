@@ -2134,3 +2134,63 @@ a.secondary:hover {
 .review-dot.warn {
   background: var(--warn);
 }
+
+/* Correspondence's drafting conversation. Assistant turns (often a full
+   letter) render as plain flowing text -- a bordered bubble reads oddly
+   at letter length -- while the user's own turns get an actual bubble,
+   right-aligned, the same visual language a chat interface needs to stay
+   scannable at a glance. */
+.chat-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.chat-message {
+  display: flex;
+}
+
+.chat-message-user {
+  justify-content: flex-end;
+}
+
+.chat-message-assistant {
+  justify-content: flex-start;
+}
+
+.chat-bubble {
+  font-size: 14.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.chat-message-user .chat-bubble {
+  max-width: 80%;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--paper-raised);
+  padding: 10px 14px;
+}
+
+.chat-message-assistant .chat-bubble {
+  width: 100%;
+  color: var(--ink);
+}
+
+.chat-bubble-pending {
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+.chat-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.chat-input-row textarea {
+  flex: 1;
+}
