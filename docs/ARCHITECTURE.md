@@ -212,6 +212,20 @@ All `.tsx` files live flat in `apps/web/src/` (no subfolders). Roughly three kin
 Client-scoped detail pages (`ClientNotesPage`, `ClientDocumentsPage`) are reached
 *from* `ClientsPage`, not from the dashboard directly.
 
+### Installing to a phone home screen
+
+`apps/web/public/manifest.webmanifest` plus the icon set in `apps/web/public/icons/`
+and `apps/web/public/apple-touch-icon.png` make the app installable from a phone
+browser's "Add to Home Screen" — it launches with its own icon, name, and no browser
+chrome (`display: "standalone"`), rather than opening as a bookmarked tab. `index.html`
+links the manifest and sets the iOS-specific `apple-mobile-web-app-*` meta tags Safari
+needs (Chrome/Android reads the manifest directly). The icon is a plain solid-ink
+square with "AC" in Fraunces — the same wordmark seal as `Brand.tsx`'s header mark,
+rendered at icon scale — kept within a safe center zone so it isn't clipped by
+Android's various maskable-icon shapes. No screen or feature files changed; this is
+static assets plus `index.html` only. Vite copies everything under `public/` to the
+build output root as-is, so these paths need no build-step wiring.
+
 ### Dashboard tiles
 
 | key | name | toggleable? |

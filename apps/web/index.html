@@ -4,6 +4,18 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ACM Caseflow</title>
+
+    <!-- Lets the app be added to a phone's home screen as if it were a
+         native app: a proper icon and name instead of a bookmark, and
+         standalone display (manifest.webmanifest) hides the browser
+         chrome once launched from there. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/favicon.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#1c1815" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="ACM Caseflow" />
   </head>
   <body>
     <div id="root"></div>
