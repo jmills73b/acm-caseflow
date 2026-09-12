@@ -827,11 +827,14 @@ export interface PiiScanMatch {
   match: string;
 }
 
+export type LetterFormat = "letter" | "email";
+
 export interface Letter {
   id: number;
   clientId: number;
   clientName: string;
   letterType: string | null;
+  format: LetterFormat;
   personalFields: string[];
   draftBody: string;
   reviewFlags: ReviewFlag[] | null;
@@ -870,6 +873,7 @@ export interface ChatMessage {
 // free text on each turn.
 export function chatDraftLetter(input: {
   letterType: string;
+  format: LetterFormat;
   personalFields: string[];
   messages: ChatMessage[];
 }): Promise<{ reply: string }> {
@@ -890,6 +894,7 @@ export function reviewLetter(draftBody: string): Promise<ReviewLetterResult> {
 export interface SaveLetterInput {
   clientId: number;
   letterType?: string | null;
+  format: LetterFormat;
   personalFields: string[];
   draftBody: string;
   reviewFlags?: ReviewFlag[] | null;

@@ -1,15 +1,20 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Icon } from "./icons";
+import { downloadBlob, generateLetterDocx, generateLetterPdf } from "./letterExport";
 import {
   addLetter,
   chatDraftLetter,
   deleteLetter,
   getClients,
+  getDocumentCategories,
   getLetters,
   reviewLetter,
+  uploadDocument,
   type ChatMessage,
   type Client,
+  type DocumentCategory,
   type Letter,
+  type LetterFormat,
   type ReviewLetterResult,
 } from "./api";
 
@@ -27,6 +32,8 @@ const PERSONAL_FIELD_OPTIONS: Array<{ token: string; label: string }> = [
   { token: "YOUR_NAME", label: "Your sign-off name" },
 ];
 
+const FORMAT_LABELS: Record<LetterFormat, string> = { letter: "Letter", email: "Email" };
+
 // Renders {{TOKEN}} placeholders as visually distinct badges wherever
 // they appear in a message, so a token reads as "not a real value yet"
 // the same way it does in the setup checklist above.
@@ -43,13 +50,133 @@ function renderWithTokens(text: string) {
   );
 }
 
+function exportFilename(letterType: string | null, clientName: string, extension: string): string {
+  const base = `${letterType?.trim() || "Letter"} - ${clientName}`.replace(/[/\\:*?"<>|]/g, "-").slice(0, 120);
+  return `${base}.${extension}`;
+}
+
+// Shared by the live draft's export row and the "view a saved letter"
+// panel below -- same two questions either way: which file format, and
+// whether a copy also belongs in Documents (case file) or is just a
+// download.
+function ExportControls({
+  clientId,
+  clientName,
+  letterType,
+  body,
+  categories,
+}: {
+  clientId: number;
+  clientName: string;
+  letterType: string | null;
+  body: string;
+  categories: DocumentCategory[];
+}) {
+  const [fileFormat, setFileFormat] = useState<"docx" | "pdf">("docx");
+  const [saveToDocuments, setSaveToDocuments] = useState(false);
+  const [categoryId, setCategoryId] = useState("");
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exported, setExported] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(body);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setExportError("Couldn't copy to clipboard");
+    }
+  }
+
+  async function handleExport() {
+    setExportError(null);
+    setExported(false);
+    setExporting(true);
+    try {
+      const filename = exportFilename(letterType, clientName, fileFormat);
+      let file: File;
+      if (fileFormat === "docx") {
+        const blob = await generateLetterDocx(body);
+        file = new File([blob], filename, { type: blob.type });
+      } else {
+        const bytes = await generateLetterPdf(body);
+        file = new File([bytes as Uint8Array<ArrayBuffer>], filename, { type: "application/pdf" });
+      }
+      downloadBlob(file, filename);
+      if (saveToDocuments) {
+        await uploadDocument({
+          clientId,
+          categoryId: categoryId ? Number(categoryId) : null,
+          direction: "outbound",
+          file,
+        });
+      }
+      setExported(true);
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : "Couldn't export the letter");
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  return (
+    <div className="edit-panel">
+      <p className="edit-panel-title">Export</p>
+      <div className="edit-row" style={{ marginBottom: 16 }}>
+        <label className="edit-field">
+          <span>File format</span>
+          <select className="input-compact" value={fileFormat} onChange={(event) => setFileFormat(event.target.value as "docx" | "pdf")}>
+            <option value="docx">Word (.docx)</option>
+            <option value="pdf">PDF</option>
+          </select>
+        </label>
+      </div>
+      <label className="token-row" style={{ marginBottom: saveToDocuments ? 12 : 0 }}>
+        <input type="checkbox" checked={saveToDocuments} onChange={(event) => setSaveToDocuments(event.target.checked)} />
+        <span className="field-name">Also save this file to Documents</span>
+      </label>
+      {saveToDocuments && (
+        <label className="edit-field" style={{ marginBottom: 16, maxWidth: 260 }}>
+          <span>Category</span>
+          <select className="input-compact" value={categoryId} onChange={(event) => setCategoryId(event.target.value)}>
+            <option value="">Uncategorised</option>
+            {categories.map((cat) => (
+              <option key={cat.id} value={cat.id}>
+                {cat.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {exportError && (
+        <p className="error" role="alert">
+          {exportError}
+        </p>
+      )}
+      <div className="row-actions">
+        <button type="button" onClick={handleExport} disabled={exporting}>
+          <Icon name="save" /> {exporting ? "Exporting…" : "Download"}
+        </button>
+        <button type="button" className="secondary" onClick={handleCopy}>
+          <Icon name="mail" /> {copied ? "Copied!" : "Copy text"}
+        </button>
+      </div>
+      {exported && <p className="hint">{saveToDocuments ? "Downloaded and saved to Documents." : "Downloaded."}</p>}
+    </div>
+  );
+}
+
 export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
   const [clients, setClients] = useState<Client[]>([]);
+  const [documentCategories, setDocumentCategories] = useState<DocumentCategory[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [clientId, setClientId] = useState<number | "">("");
   const [letterType, setLetterType] = useState("");
+  const [format, setFormat] = useState<LetterFormat>("letter");
   const [personalFields, setPersonalFields] = useState<string[]>(PERSONAL_FIELD_OPTIONS.map((f) => f.token));
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -64,15 +191,20 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
 
   const [history, setHistory] = useState<Letter[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [viewingLetter, setViewingLetter] = useState<Letter | null>(null);
 
   useEffect(() => {
-    getClients()
-      .then(setClients)
+    Promise.all([getClients(), getDocumentCategories()])
+      .then(([clientList, categoryList]) => {
+        setClients(clientList);
+        setDocumentCategories(categoryList);
+      })
       .catch((err) => setLoadError(err instanceof Error ? err.message : "Couldn't load Correspondence"))
       .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {
+    setViewingLetter(null);
     if (clientId === "") {
       setHistory([]);
       return;
@@ -112,7 +244,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
     const kickoff: ChatMessage = { role: "user", content: `I need to write: ${letterType.trim()}` };
     setSending(true);
     try {
-      const result = await chatDraftLetter({ letterType: letterType.trim(), personalFields, messages: [kickoff] });
+      const result = await chatDraftLetter({ letterType: letterType.trim(), format, personalFields, messages: [kickoff] });
       setMessages([kickoff, { role: "assistant", content: result.reply }]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't reach the drafting agent");
@@ -133,7 +265,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
     setError(null);
     setSending(true);
     try {
-      const result = await chatDraftLetter({ letterType: letterType.trim(), personalFields, messages: nextMessages });
+      const result = await chatDraftLetter({ letterType: letterType.trim(), format, personalFields, messages: nextMessages });
       setMessages([...nextMessages, { role: "assistant", content: result.reply }]);
       setReview(null);
       setSaved(false);
@@ -167,6 +299,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
       await addLetter({
         clientId,
         letterType: letterType.trim(),
+        format,
         personalFields,
         draftBody: lastAssistantMessage.content,
         reviewFlags: review?.flags ?? null,
@@ -175,6 +308,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
       setSaved(true);
       startOver();
       setLetterType("");
+      setFormat("letter");
       setHistory(await getLetters(clientId));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't save the letter");
@@ -189,6 +323,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
     try {
       await deleteLetter(id);
       setHistory((prev) => prev.filter((l) => l.id !== id));
+      if (viewingLetter?.id === id) setViewingLetter(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't delete that letter");
     }
@@ -197,6 +332,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
   if (loading) return <p className="loading">Loading…</p>;
 
   const inConversation = messages.length > 0;
+  const selectedClientName = clients.find((c) => c.id === clientId)?.name ?? "";
 
   return (
     <>
@@ -246,6 +382,18 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                     </option>
                   ))}
               </optgroup>
+            </select>
+          </label>
+          <label className="edit-field">
+            <span>Output</span>
+            <select
+              className="input-compact"
+              value={format}
+              disabled={inConversation}
+              onChange={(event) => setFormat(event.target.value as LetterFormat)}
+            >
+              <option value="letter">Letter</option>
+              <option value="email">Email</option>
             </select>
           </label>
         </div>
@@ -375,20 +523,28 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
             </>
           )}
 
-          <div className="row-actions" style={{ marginBottom: 40 }}>
+          <div className="row-actions" style={{ marginBottom: 24 }}>
             <button type="button" onClick={handleSave} disabled={!lastAssistantMessage || saving}>
               <Icon name="save" /> {saving ? "Saving…" : "Save to history"}
             </button>
           </div>
           {saved && <p className="hint">Saved.</p>}
+
+          {lastAssistantMessage && clientId !== "" && (
+            <ExportControls
+              clientId={clientId}
+              clientName={selectedClientName}
+              letterType={letterType.trim() || null}
+              body={lastAssistantMessage.content}
+              categories={documentCategories}
+            />
+          )}
         </>
       )}
 
       {clientId !== "" && (
         <>
-          <p className="settings-section-title">
-            Correspondence history — {clients.find((c) => c.id === clientId)?.name ?? ""}
-          </p>
+          <p className="settings-section-title">Correspondence history — {selectedClientName}</p>
           {historyLoading ? (
             <p className="loading">Loading…</p>
           ) : history.length === 0 ? (
@@ -400,6 +556,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                   <tr>
                     <th>Date</th>
                     <th>Type</th>
+                    <th>Format</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
@@ -408,8 +565,16 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                     <tr key={letter.id}>
                       <td>{new Date(letter.createdAt).toLocaleDateString("en-GB")}</td>
                       <td>{letter.letterType ?? "—"}</td>
+                      <td>{FORMAT_LABELS[letter.format] ?? letter.format}</td>
                       <td>
                         <div className="row-actions">
+                          <button
+                            type="button"
+                            className="secondary"
+                            onClick={() => setViewingLetter(viewingLetter?.id === letter.id ? null : letter)}
+                          >
+                            <Icon name="mail" /> {viewingLetter?.id === letter.id ? "Hide" : "View"}
+                          </button>
                           <button type="button" className="danger" onClick={() => handleDeleteHistory(letter.id)}>
                             <Icon name="delete" /> Delete
                           </button>
@@ -420,6 +585,36 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                 </tbody>
               </table>
             </div>
+          )}
+
+          {viewingLetter && (
+            <>
+              <p className="settings-section-title">
+                {viewingLetter.letterType ?? "Letter"} — {new Date(viewingLetter.createdAt).toLocaleDateString("en-GB")}
+              </p>
+              <div className="edit-panel chat-transcript">
+                <div className="chat-message chat-message-assistant">
+                  <div className="chat-bubble">{renderWithTokens(viewingLetter.draftBody)}</div>
+                </div>
+              </div>
+              {viewingLetter.reviewFlags && viewingLetter.reviewFlags.length > 0 && (
+                <ul className="review-list" style={{ marginBottom: 16 }}>
+                  {viewingLetter.reviewFlags.map((flag, i) => (
+                    <li className="review-item" key={i}>
+                      <span className={`review-dot ${flag.severity === "concern" ? "warn" : ""}`} />
+                      <span>{flag.text}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <ExportControls
+                clientId={viewingLetter.clientId}
+                clientName={viewingLetter.clientName}
+                letterType={viewingLetter.letterType}
+                body={viewingLetter.draftBody}
+                categories={documentCategories}
+              />
+            </>
           )}
         </>
       )}

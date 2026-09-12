@@ -96,6 +96,7 @@ idempotent data imports from the spreadsheet this app replaces.
 | 0026 | `0026_correspondence.sql` | Adds `letter_categories`, `letters` (soft delete, like `documents`); adds `account_settings.compliance_guidelines`. |
 | 0027 | `0027_correspondence_chat_redesign.sql` | Drops `letter_categories` and `letters`' `letter_category_id`/`amount`/`reference`/`key_date`/`tone`/`bespoke_request` columns; adds `letters.letter_type` (free text). Letter type and every fact/tone detail moved into the drafting conversation itself — no production data depended on the dropped columns yet. |
 | 0028 | `0028_ai_model_and_usage.sql` | Adds `account_settings.ai_model` (defaults to Haiku 4.5); adds `ai_usage` (per-call token counts for Correspondence's agents, keyed by `endpoint`/`model`). |
+| 0029 | `0029_letter_format.sql` | Adds `letters.format` (`letter`/`email`, defaults to `letter`). |
 
 ### Current tables (25)
 
@@ -193,7 +194,18 @@ Notable business logic worth knowing about, not obvious from the route list alon
   `ai_usage` (`endpoint`/`model`/`input_tokens`/`output_tokens`); `GET /letters/usage`
   aggregates that into a per-model and total estimated-cost figure (from Anthropic's
   published per-token pricing, computed by this app — not a live account balance) for
-  the Usage admin tab.
+  the Usage admin tab. `letters.format` (`letter` or `email`) is chosen alongside letter
+  type before drafting starts and changes the drafting agent's system prompt — an email
+  gets a `Subject:` line and no postal address block, a letter doesn't. A saved letter
+  can be reopened from Correspondence history (`GET /letters` already returns
+  `draftBody`, nothing extra to fetch) and, from either the live draft or a reopened
+  one, exported: `apps/web/src/letterExport.ts` generates a Word (`docx` package) or
+  PDF (`pdf-lib`, lazy-imported like `invoicePdf.ts`) file client-side from the draft
+  text verbatim (tokens included), which either just downloads or — if "Also save this
+  file to Documents" is ticked — also uploads through the existing Documents feature
+  (`uploadDocument`, direction `outbound`), landing in R2 encrypted like any other
+  document. Nothing about the export path touches the AI or sends the letter anywhere
+  new; it's the same accepted draft, repackaged.
 
 ## Frontend
 

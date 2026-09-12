@@ -18,6 +18,7 @@ interface LetterRow {
   id: number;
   client_id: number;
   letter_type: string | null;
+  format: string;
   personal_fields: string;
   draft_body: string;
   review_flags: string | null;
@@ -61,6 +62,7 @@ function fakeEnv(
       client_id: row.client_id,
       client_name: clients.find((c) => c.id === row.client_id)?.name ?? "",
       letter_type: row.letter_type,
+      format: row.format,
       personal_fields: row.personal_fields,
       draft_body: row.draft_body,
       review_flags: row.review_flags,
@@ -90,10 +92,11 @@ function fakeEnv(
               return (clients.some((c) => c.id === id) ? { id } : null) as T;
             }
             if (sql.includes("INSERT INTO letters")) {
-              const [clientId, letterType, personalFields, draftBody, reviewFlags, piiScanClean, createdBy] =
+              const [clientId, letterType, format, personalFields, draftBody, reviewFlags, piiScanClean, createdBy] =
                 boundArgs as [
                   number,
                   string | null,
+                  string,
                   string,
                   string,
                   string | null,
@@ -105,6 +108,7 @@ function fakeEnv(
                 id,
                 client_id: clientId,
                 letter_type: letterType,
+                format,
                 personal_fields: personalFields,
                 draft_body: draftBody,
                 review_flags: reviewFlags,
@@ -203,6 +207,7 @@ describe("GET /api/letters", () => {
             id: 1,
             client_id: 1,
             letter_type: "Fee estimate cover letter",
+            format: "letter",
             personal_fields: JSON.stringify(["CLIENT_NAME"]),
             draft_body: "Dear {{CLIENT_NAME}},",
             review_flags: null,
@@ -350,6 +355,31 @@ describe("POST /api/letters/chat", () => {
       fakeEnv({ apiKey: API_KEY }),
     );
     expect(JSON.parse(fetchMockDefault.mock.calls[0][1].body).model).toBe("claude-haiku-4-5");
+  });
+
+  it("rejects an invalid format", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters/chat",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ ...validBody, format: "fax" }) },
+      fakeEnv({ apiKey: API_KEY }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("asks for an email with a subject line when format is email", async () => {
+    const cookie = await sessionCookie();
+    const fetchMock = vi.fn(async () => claudeResponse("Subject: Fee estimate\n\nDear {{CLIENT_NAME}},"));
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await app.request(
+      "/api/letters/chat",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ ...validBody, format: "email" }) },
+      fakeEnv({ apiKey: API_KEY }),
+    );
+    expect(res.status).toBe(200);
+    const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(sentBody.system).toContain("drafting an email");
+    expect(sentBody.system).toContain("Subject:");
   });
 
   it("logs the call's token usage against the model used", async () => {
@@ -553,6 +583,7 @@ describe("POST /api/letters", () => {
         body: JSON.stringify({
           clientId: 1,
           letterType: "Fee estimate cover letter",
+          format: "email",
           personalFields: ["CLIENT_NAME"],
           draftBody: "Dear {{CLIENT_NAME}},",
           reviewFlags: [{ severity: "ok", text: "Fine." }],
@@ -566,9 +597,38 @@ describe("POST /api/letters", () => {
     expect(body).toMatchObject({
       clientName: "Sarah Whitfield",
       letterType: "Fee estimate cover letter",
+      format: "email",
       draftBody: "Dear {{CLIENT_NAME}},",
       piiScanClean: true,
     });
+  });
+
+  it("defaults format to letter when omitted", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters",
+      {
+        method: "POST",
+        headers: { Cookie: cookie },
+        body: JSON.stringify({ clientId: 1, draftBody: "Dear {{CLIENT_NAME}}," }),
+      },
+      fakeEnv(),
+    );
+    expect((await res.json()).format).toBe("letter");
+  });
+
+  it("rejects an invalid format", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters",
+      {
+        method: "POST",
+        headers: { Cookie: cookie },
+        body: JSON.stringify({ clientId: 1, draftBody: "Dear {{CLIENT_NAME}},", format: "fax" }),
+      },
+      fakeEnv(),
+    );
+    expect(res.status).toBe(400);
   });
 });
 
@@ -590,6 +650,7 @@ describe("DELETE /api/letters/:id", () => {
             id: 1,
             client_id: 1,
             letter_type: null,
+            format: "letter",
             personal_fields: "[]",
             draft_body: "Dear {{CLIENT_NAME}},",
             review_flags: null,
