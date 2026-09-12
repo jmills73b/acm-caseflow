@@ -134,7 +134,7 @@ system, just signed-in-or-not (see [Auth model](#auth-model)).
 | `/api/invoice-batches` | `invoiceBatches.ts` | `GET /`, `GET /:id`, `POST /`, `DELETE /:id` |
 | `/api/invoice-settings` | `invoiceSettings.ts` | `GET /`, `PUT /` |
 | `/api/invoices` | `invoices.ts` | `GET /`, `POST /`, `PATCH /:id`, `DELETE /:id` |
-| `/api/letters` | `letters.ts` | `GET /`, `GET /deleted`, `GET /usage`, `POST /chat`, `POST /review`, `POST /`, `DELETE /:id` |
+| `/api/letters` | `letters.ts` | `GET /`, `GET /deleted`, `GET /usage`, `POST /chat`, `POST /review`, `POST /`, `PATCH /:id`, `DELETE /:id` |
 | `/api/note-categories` | `noteCategories.ts` | `GET /`, `POST /`, `PATCH /:id`, `DELETE /:id` |
 | `/api/tasks` | `tasks.ts` | `GET /`, `GET /:id`, `POST /`, `PATCH /:id`, `POST /:id/actions` |
 | `/api/tax-year-settings` | `taxYearSettings.ts` | `GET /:startYear`, `POST /:startYear`, `POST /:startYear/split`, `PUT /:startYear/rates` |
@@ -205,7 +205,16 @@ Notable business logic worth knowing about, not obvious from the route list alon
   file to Documents" is ticked — also uploads through the existing Documents feature
   (`uploadDocument`, direction `outbound`), landing in R2 encrypted like any other
   document. Nothing about the export path touches the AI or sends the letter anywhere
-  new; it's the same accepted draft, repackaged.
+  new; it's the same accepted draft, repackaged. A reopened letter can also go back
+  into drafting ("Continue editing"): since the chat endpoint is stateless and no
+  conversation history is stored, this seeds a fresh two-turn conversation (a synthetic
+  "resuming this letter" opener plus the saved draft as the reply) for the agent to
+  revise from, and carries the letter's id so Save updates that row (`PATCH
+  /letters/:id`) instead of creating a duplicate. The review panel doubles as a
+  feedback loop: each OK/CONCERN flag has a checkbox, there's a free-text box for
+  anything else, and "Send feedback to agent" combines whatever's checked plus the
+  free text into the next chat turn — same as typing it into the chat box yourself,
+  just without re-transcribing the flags.
 
 ## Frontend
 

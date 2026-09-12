@@ -177,6 +177,26 @@ function fakeEnv(
               row.deleted_by = deletedBy;
               return { success: true, meta: { changes: 1 } };
             }
+            if (sql.includes("UPDATE letters SET letter_type")) {
+              const [letterType, format, personalFields, draftBody, reviewFlags, piiScanClean, id] = boundArgs as [
+                string | null,
+                string,
+                string,
+                string,
+                string | null,
+                number | null,
+                number,
+              ];
+              const row = letterStore.get(id);
+              if (!row || row.deleted_at !== null) return { success: true, meta: { changes: 0 } };
+              row.letter_type = letterType;
+              row.format = format;
+              row.personal_fields = personalFields;
+              row.draft_body = draftBody;
+              row.review_flags = reviewFlags;
+              row.pii_scan_clean = piiScanClean;
+              return { success: true, meta: { changes: 1 } };
+            }
             return { success: true, meta: {} };
           },
         };
@@ -629,6 +649,88 @@ describe("POST /api/letters", () => {
       fakeEnv(),
     );
     expect(res.status).toBe(400);
+  });
+});
+
+describe("PATCH /api/letters/:id", () => {
+  const existing = {
+    id: 1,
+    client_id: 1,
+    letter_type: "Fee estimate cover letter",
+    format: "letter",
+    personal_fields: JSON.stringify(["CLIENT_NAME"]),
+    draft_body: "Dear {{CLIENT_NAME}}, first draft.",
+    review_flags: null,
+    pii_scan_clean: null,
+    created_by: 1,
+    created_at: "2026-09-12T12:00:00.000Z",
+    deleted_at: null,
+    deleted_by: null,
+  };
+
+  it("rejects a missing draftBody", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters/1",
+      { method: "PATCH", headers: { Cookie: cookie }, body: JSON.stringify({}) },
+      fakeEnv({ letters: [existing] }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects an invalid format", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters/1",
+      {
+        method: "PATCH",
+        headers: { Cookie: cookie },
+        body: JSON.stringify({ draftBody: "Revised.", format: "fax" }),
+      },
+      fakeEnv({ letters: [existing] }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("404s for an unknown or already-deleted letter", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters/99",
+      { method: "PATCH", headers: { Cookie: cookie }, body: JSON.stringify({ draftBody: "Revised." }) },
+      fakeEnv({ letters: [existing] }),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("updates the letter in place, leaving clientId and createdAt untouched", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters/1",
+      {
+        method: "PATCH",
+        headers: { Cookie: cookie },
+        body: JSON.stringify({
+          letterType: "Fee estimate cover letter",
+          format: "email",
+          personalFields: ["CLIENT_NAME", "YOUR_NAME"],
+          draftBody: "Dear {{CLIENT_NAME}}, revised draft.",
+          reviewFlags: [{ severity: "ok", text: "Fine now." }],
+          piiScanClean: true,
+        }),
+      },
+      fakeEnv({ letters: [existing] }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      id: 1,
+      clientId: 1,
+      clientName: "Sarah Whitfield",
+      format: "email",
+      draftBody: "Dear {{CLIENT_NAME}}, revised draft.",
+      piiScanClean: true,
+      createdAt: "2026-09-12T12:00:00.000Z",
+    });
   });
 });
 

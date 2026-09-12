@@ -9,6 +9,7 @@ import {
   getDocumentCategories,
   getLetters,
   reviewLetter,
+  updateLetter,
   uploadDocument,
   type ChatMessage,
   type Client,
@@ -182,9 +183,15 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [sending, setSending] = useState(false);
+  // Set once "Continue editing" resumes a saved letter as a live
+  // conversation -- Save then updates that same history row (PATCH)
+  // instead of creating a new one (POST). Cleared by startOver/handleSave.
+  const [editingLetterId, setEditingLetterId] = useState<number | null>(null);
 
   const [review, setReview] = useState<ReviewLetterResult | null>(null);
   const [reviewing, setReviewing] = useState(false);
+  const [selectedFlags, setSelectedFlags] = useState<Set<number>>(new Set());
+  const [feedbackText, setFeedbackText] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -222,12 +229,53 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
     setPersonalFields((prev) => (prev.includes(token) ? prev.filter((f) => f !== token) : [...prev, token]));
   }
 
+  function toggleSelectedFlag(index: number) {
+    setSelectedFlags((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  }
+
+  // Deliberately doesn't reset `saved` -- handleSave calls this right after
+  // a successful save, and the "Saved." confirmation (rendered outside the
+  // in-conversation view below) needs to survive the reset back to the
+  // pre-drafting screen. handleStart clears it instead, once a genuinely
+  // new draft begins.
   function startOver() {
     setMessages([]);
     setChatInput("");
     setReview(null);
-    setSaved(false);
+    setSelectedFlags(new Set());
+    setFeedbackText("");
+    setEditingLetterId(null);
     setError(null);
+  }
+
+  // Shared by the kickoff message, a normal chat reply, and review
+  // feedback -- all three are "append this as the next user turn and get
+  // the agent's reply", differing only in how the content is composed.
+  async function sendToAgent(content: string): Promise<boolean> {
+    const userMessage: ChatMessage = { role: "user", content };
+    const nextMessages = [...messages, userMessage];
+    setMessages(nextMessages);
+    setError(null);
+    setSending(true);
+    try {
+      const result = await chatDraftLetter({ letterType: letterType.trim(), format, personalFields, messages: nextMessages });
+      setMessages([...nextMessages, { role: "assistant", content: result.reply }]);
+      setReview(null);
+      setSelectedFlags(new Set());
+      setSaved(false);
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't reach the drafting agent");
+      setMessages(messages);
+      return false;
+    } finally {
+      setSending(false);
+    }
   }
 
   async function handleStart() {
@@ -239,43 +287,17 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
       setError("Describe the kind of letter you need");
       return;
     }
-
-    setError(null);
-    const kickoff: ChatMessage = { role: "user", content: `I need to write: ${letterType.trim()}` };
-    setSending(true);
-    try {
-      const result = await chatDraftLetter({ letterType: letterType.trim(), format, personalFields, messages: [kickoff] });
-      setMessages([kickoff, { role: "assistant", content: result.reply }]);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't reach the drafting agent");
-    } finally {
-      setSending(false);
-    }
+    setSaved(false);
+    await sendToAgent(`I need to write: ${letterType.trim()}`);
   }
 
   async function handleSend(event: FormEvent) {
     event.preventDefault();
     const text = chatInput.trim();
     if (!text) return;
-
-    const userMessage: ChatMessage = { role: "user", content: text };
-    const nextMessages = [...messages, userMessage];
-    setMessages(nextMessages);
     setChatInput("");
-    setError(null);
-    setSending(true);
-    try {
-      const result = await chatDraftLetter({ letterType: letterType.trim(), format, personalFields, messages: nextMessages });
-      setMessages([...nextMessages, { role: "assistant", content: result.reply }]);
-      setReview(null);
-      setSaved(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't reach the drafting agent");
-      setMessages(messages);
-      setChatInput(text);
-    } finally {
-      setSending(false);
-    }
+    const ok = await sendToAgent(text);
+    if (!ok) setChatInput(text);
   }
 
   async function handleReview() {
@@ -284,10 +306,38 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
     setReviewing(true);
     try {
       setReview(await reviewLetter(lastAssistantMessage.content));
+      setSelectedFlags(new Set());
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't review the letter");
     } finally {
       setReviewing(false);
+    }
+  }
+
+  // The feedback loop: turn the flags you've picked plus anything you've
+  // typed into one message, send it as the next chat turn, and let the
+  // agent revise -- rather than you having to retype the review's
+  // findings into the chat box yourself.
+  async function handleSendFeedback() {
+    if (!review) return;
+    const flagTexts = review.flags.filter((_, i) => selectedFlags.has(i)).map((f) => f.text);
+    const parts: string[] = [];
+    if (flagTexts.length > 0) {
+      parts.push(`Please address this review feedback:\n${flagTexts.map((t) => `- ${t}`).join("\n")}`);
+    }
+    if (feedbackText.trim()) {
+      parts.push(feedbackText.trim());
+    }
+    if (parts.length === 0) return;
+
+    const previousFlags = selectedFlags;
+    const previousText = feedbackText;
+    setSelectedFlags(new Set());
+    setFeedbackText("");
+    const ok = await sendToAgent(parts.join("\n\n"));
+    if (!ok) {
+      setSelectedFlags(previousFlags);
+      setFeedbackText(previousText);
     }
   }
 
@@ -296,15 +346,19 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
     setError(null);
     setSaving(true);
     try {
-      await addLetter({
-        clientId,
+      const payload = {
         letterType: letterType.trim(),
         format,
         personalFields,
         draftBody: lastAssistantMessage.content,
         reviewFlags: review?.flags ?? null,
         piiScanClean: review?.piiScanClean ?? null,
-      });
+      };
+      if (editingLetterId !== null) {
+        await updateLetter(editingLetterId, payload);
+      } else {
+        await addLetter({ clientId, ...payload });
+      }
       setSaved(true);
       startOver();
       setLetterType("");
@@ -315,6 +369,38 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
     } finally {
       setSaving(false);
     }
+  }
+
+  // Resumes a saved letter as a live conversation -- there's no stored
+  // chat history (the chat endpoint is stateless, see api.ts), so this
+  // seeds a fresh two-turn conversation ending in the saved draft, which
+  // is enough for the agent to revise from. Saving from here updates the
+  // same row (see handleSave) rather than creating a duplicate.
+  function handleContinueEditing(letter: Letter) {
+    setLetterType(letter.letterType ?? "");
+    setFormat(letter.format);
+    setPersonalFields(letter.personalFields);
+    setMessages([
+      { role: "user", content: `Resuming this previously saved ${FORMAT_LABELS[letter.format].toLowerCase()} for further edits.` },
+      { role: "assistant", content: letter.draftBody },
+    ]);
+    setReview(
+      letter.reviewFlags || letter.piiScanClean !== null
+        ? {
+            piiScanClean: letter.piiScanClean ?? true,
+            piiMatches: [],
+            reviewConfigured: (letter.reviewFlags?.length ?? 0) > 0,
+            flags: letter.reviewFlags ?? [],
+          }
+        : null,
+    );
+    setSelectedFlags(new Set());
+    setFeedbackText("");
+    setEditingLetterId(letter.id);
+    setSaved(false);
+    setError(null);
+    setViewingLetter(null);
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   async function handleDeleteHistory(id: number) {
@@ -446,6 +532,11 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
       ) : (
         <>
           <p className="settings-section-title">3. Draft it together</p>
+          {editingLetterId !== null && (
+            <p className="hint" style={{ marginBottom: 12 }}>
+              Continuing a previously saved letter — saving will update that history entry rather than add a new one.
+            </p>
+          )}
           <div className="edit-panel chat-transcript">
             {messages.map((message, i) => (
               <div className={`chat-message chat-message-${message.role}`} key={i}>
@@ -512,12 +603,34 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                   <ul className="review-list">
                     {review.flags.map((flag, i) => (
                       <li className="review-item" key={i}>
-                        <span className={`review-dot ${flag.severity === "concern" ? "warn" : ""}`} />
-                        <span>{flag.text}</span>
+                        <label className="token-row" style={{ gap: 8 }}>
+                          <input type="checkbox" checked={selectedFlags.has(i)} onChange={() => toggleSelectedFlag(i)} />
+                          <span className={`review-dot ${flag.severity === "concern" ? "warn" : ""}`} />
+                          <span>{flag.text}</span>
+                        </label>
                       </li>
                     ))}
                   </ul>
                 )}
+                <label className="edit-field" style={{ marginTop: review.flags.length > 0 ? 16 : 4, marginBottom: 12 }}>
+                  <span>Feedback for the drafting agent (optional)</span>
+                  <textarea
+                    rows={2}
+                    value={feedbackText}
+                    onChange={(event) => setFeedbackText(event.target.value)}
+                    placeholder="Check any points above the agent should address, or add anything else here — e.g. why a flag doesn't apply, or another change to make"
+                    disabled={sending}
+                  />
+                </label>
+                <div className="row-actions">
+                  <button
+                    type="button"
+                    onClick={handleSendFeedback}
+                    disabled={sending || (selectedFlags.size === 0 && !feedbackText.trim())}
+                  >
+                    <Icon name="add" /> {sending ? "Sending…" : "Send feedback to agent"}
+                  </button>
+                </div>
               </div>
               <p className="panel-note">Advisory, not a gate — you decide what to act on.</p>
             </>
@@ -525,10 +638,9 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
 
           <div className="row-actions" style={{ marginBottom: 24 }}>
             <button type="button" onClick={handleSave} disabled={!lastAssistantMessage || saving}>
-              <Icon name="save" /> {saving ? "Saving…" : "Save to history"}
+              <Icon name="save" /> {saving ? "Saving…" : editingLetterId !== null ? "Save changes" : "Save to history"}
             </button>
           </div>
-          {saved && <p className="hint">Saved.</p>}
 
           {lastAssistantMessage && clientId !== "" && (
             <ExportControls
@@ -541,6 +653,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
           )}
         </>
       )}
+      {saved && <p className="hint">Saved.</p>}
 
       {clientId !== "" && (
         <>
@@ -607,6 +720,11 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                   ))}
                 </ul>
               )}
+              <div className="row-actions" style={{ marginBottom: 16 }}>
+                <button type="button" onClick={() => handleContinueEditing(viewingLetter)}>
+                  <Icon name="tag" /> Continue editing
+                </button>
+              </div>
               <ExportControls
                 clientId={viewingLetter.clientId}
                 clientName={viewingLetter.clientName}

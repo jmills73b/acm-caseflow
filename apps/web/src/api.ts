@@ -905,6 +905,13 @@ export function addLetter(input: SaveLetterInput): Promise<Letter> {
   return request("/api/letters", { method: "POST", body: JSON.stringify(input) });
 }
 
+// Used by "Continue editing" a saved letter (LetterGeneratorPage.tsx) --
+// updates the same history row in place rather than creating a duplicate,
+// since it's a revision of the same letter, not a new one.
+export function updateLetter(id: number, input: Omit<SaveLetterInput, "clientId">): Promise<Letter> {
+  return request(`/api/letters/${id}`, { method: "PATCH", body: JSON.stringify(input) });
+}
+
 export function deleteLetter(id: number): Promise<{ ok: boolean }> {
   return request(`/api/letters/${id}`, { method: "DELETE" });
 }

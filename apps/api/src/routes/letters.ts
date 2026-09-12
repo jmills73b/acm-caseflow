@@ -359,6 +359,53 @@ letters.post("/", async (c) => {
   return c.json(toLetter(row), 201);
 });
 
+// "Continue editing" (LetterGeneratorPage.tsx) resumes a saved letter as a
+// live drafting conversation and, on save, updates this same row rather
+// than creating a duplicate history entry -- clientId/createdBy/createdAt
+// stay fixed since this is a revision of the same letter, not a new one.
+letters.patch("/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) {
+    return c.json({ error: "Invalid letter id" }, 400);
+  }
+
+  const body = await c.req.json<SaveRequest>();
+  if (!body.draftBody?.trim()) {
+    return c.json({ error: "draftBody is required" }, 400);
+  }
+  if (body.format !== undefined && !isValidFormat(body.format)) {
+    return c.json({ error: `format must be one of: ${LETTER_FORMATS.join(", ")}` }, 400);
+  }
+
+  const result = await c.env.DB.prepare(
+    `UPDATE letters SET letter_type = ?, format = ?, personal_fields = ?, draft_body = ?, review_flags = ?, pii_scan_clean = ?
+     WHERE id = ? AND deleted_at IS NULL`,
+  )
+    .bind(
+      body.letterType ?? null,
+      isValidFormat(body.format) ? body.format : "letter",
+      JSON.stringify(body.personalFields ?? []),
+      body.draftBody,
+      body.reviewFlags ? JSON.stringify(body.reviewFlags) : null,
+      body.piiScanClean === undefined || body.piiScanClean === null ? null : body.piiScanClean ? 1 : 0,
+      id,
+    )
+    .run();
+
+  if (result.meta.changes === 0) {
+    return c.json({ error: "Letter not found" }, 404);
+  }
+
+  const row = await c.env.DB.prepare(`SELECT ${LIST_COLUMNS} ${LIST_JOIN} WHERE letters.id = ?`)
+    .bind(id)
+    .first<LetterRow>();
+  if (!row) {
+    return c.json({ error: "Could not load the saved letter" }, 500);
+  }
+
+  return c.json(toLetter(row));
+});
+
 letters.delete("/:id", async (c) => {
   const userId = c.get("userId");
   const id = Number(c.req.param("id"));
