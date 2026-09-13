@@ -30,6 +30,7 @@ export function isValidAiModel(id: unknown): id is string {
 interface AnthropicResponse {
   content: Array<{ type: string; text?: string }>;
   usage?: { input_tokens: number; output_tokens: number };
+  stop_reason?: string;
 }
 
 export interface ChatMessage {
@@ -40,6 +41,12 @@ export interface ChatMessage {
 export interface ClaudeResult {
   text: string;
   usage: { inputTokens: number; outputTokens: number };
+  // True when the reply was cut off by hitting max_tokens rather than
+  // finishing naturally -- previously this went undetected and a
+  // mid-sentence reply was returned as if it were complete (a real bug:
+  // a formal letter can easily exceed the old 1024-token cap). Callers
+  // surface this so a cut-off reply is never silently treated as done.
+  truncated: boolean;
 }
 
 // Takes a message array rather than a single string so the same helper
@@ -61,7 +68,12 @@ export async function callClaude(
     },
     body: JSON.stringify({
       model,
-      max_tokens: 1024,
+      // 1024 was too low -- a full formal letter can easily run past 700-800
+      // words, and Anthropic silently returns whatever fits so far with
+      // stop_reason "max_tokens" rather than an error. 4096 covers even a
+      // long letter with headroom; the cap costs nothing extra when the
+      // model finishes naturally well under it.
+      max_tokens: 4096,
       system,
       messages,
     }),
@@ -82,5 +94,6 @@ export async function callClaude(
       inputTokens: data.usage?.input_tokens ?? 0,
       outputTokens: data.usage?.output_tokens ?? 0,
     },
+    truncated: data.stop_reason === "max_tokens",
   };
 }

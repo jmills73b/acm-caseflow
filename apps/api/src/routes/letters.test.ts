@@ -10,8 +10,11 @@ async function sessionCookie(userId = 1): Promise<string> {
   return `session=${await createSessionToken({ userId, exp: Math.floor(Date.now() / 1000) + 60 }, SECRET)}`;
 }
 
-function claudeResponse(text: string, usage = { input_tokens: 42, output_tokens: 84 }) {
-  return new Response(JSON.stringify({ content: [{ type: "text", text }], usage }), { status: 200 });
+function claudeResponse(text: string, usage = { input_tokens: 42, output_tokens: 84 }, stopReason = "end_turn") {
+  return new Response(
+    JSON.stringify({ content: [{ type: "text", text }], usage, stop_reason: stopReason }),
+    { status: 200 },
+  );
 }
 
 interface LetterRow {
@@ -320,7 +323,36 @@ describe("POST /api/letters/chat", () => {
       fakeEnv({ apiKey: API_KEY }),
     );
     expect(res.status).toBe(200);
-    expect((await res.json()).reply).toContain("{{CLIENT_NAME}}");
+    const body = await res.json();
+    expect(body.reply).toContain("{{CLIENT_NAME}}");
+    expect(body.truncated).toBe(false);
+  });
+
+  it("flags a reply that was cut off by hitting the token limit", async () => {
+    const cookie = await sessionCookie();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => claudeResponse("Dear {{CLIENT_NAME}}, this letter concerns the ongoing", undefined, "max_tokens")),
+    );
+    const res = await app.request(
+      "/api/letters/chat",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify(validBody) },
+      fakeEnv({ apiKey: API_KEY }),
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).truncated).toBe(true);
+  });
+
+  it("requests a generous token budget so a full letter isn't cut off", async () => {
+    const cookie = await sessionCookie();
+    const fetchMock = vi.fn(async () => claudeResponse("Dear {{CLIENT_NAME}},"));
+    vi.stubGlobal("fetch", fetchMock);
+    await app.request(
+      "/api/letters/chat",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify(validBody) },
+      fakeEnv({ apiKey: API_KEY }),
+    );
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).max_tokens).toBeGreaterThanOrEqual(4096);
   });
 
   it("carries the full conversation through to the Anthropic call", async () => {
@@ -501,6 +533,22 @@ describe("POST /api/letters/review", () => {
       { severity: "ok", text: "Tone is appropriate." },
       { severity: "concern", text: "Doesn't mention the estimate expiry." },
     ]);
+    expect(body.truncated).toBe(false);
+  });
+
+  it("flags a review response that was cut off by hitting the token limit", async () => {
+    const cookie = await sessionCookie();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => claudeResponse("OK: Tone is appropriate.\nCONCERN: Doesn't mention the", undefined, "max_tokens")),
+    );
+    const res = await app.request(
+      "/api/letters/review",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ draftBody: "Dear {{CLIENT_NAME}}," }) },
+      fakeEnv({ apiKey: API_KEY }),
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).truncated).toBe(true);
   });
 
   it("includes the drafting conversation in the reviewer's system prompt when provided", async () => {
