@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Icon } from "./icons";
 import { downloadBlob, generateLetterDocx, generateLetterPdf } from "./letterExport";
 import {
@@ -34,6 +34,44 @@ const PERSONAL_FIELD_OPTIONS: Array<{ token: string; label: string }> = [
 ];
 
 const FORMAT_LABELS: Record<LetterFormat, string> = { letter: "Letter", email: "Email" };
+
+// Grows with typed content instead of staying a cramped fixed height, up
+// to maxHeight -- past that it scrolls within itself rather than pushing
+// the rest of the page down indefinitely.
+function AutoGrowTextarea({
+  value,
+  onChange,
+  placeholder,
+  disabled,
+  maxHeight = 240,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  disabled?: boolean;
+  maxHeight?: number;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
+  }, [value, maxHeight]);
+
+  return (
+    <textarea
+      ref={ref}
+      rows={2}
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      placeholder={placeholder}
+      disabled={disabled}
+      style={{ maxHeight, overflowY: "auto", resize: "none" }}
+    />
+  );
+}
 
 // Renders {{TOKEN}} placeholders as visually distinct badges wherever
 // they appear in a message, so a token reads as "not a real value yet"
@@ -183,6 +221,9 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [sending, setSending] = useState(false);
+  // True when the last reply was cut off by hitting the model's token
+  // limit rather than finishing naturally -- see anthropic.ts's `truncated`.
+  const [lastReplyTruncated, setLastReplyTruncated] = useState(false);
   // Set once "Continue editing" resumes a saved letter as a live
   // conversation -- Save then updates that same history row (PATCH)
   // instead of creating a new one (POST). Cleared by startOver/handleSave.
@@ -250,6 +291,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
     setSelectedFlags(new Set());
     setFeedbackText("");
     setEditingLetterId(null);
+    setLastReplyTruncated(false);
     setError(null);
   }
 
@@ -261,6 +303,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
     const nextMessages = [...messages, userMessage];
     setMessages(nextMessages);
     setError(null);
+    setLastReplyTruncated(false);
     setSending(true);
     try {
       const result = await chatDraftLetter({ letterType: letterType.trim(), format, personalFields, messages: nextMessages });
@@ -268,6 +311,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
       setReview(null);
       setSelectedFlags(new Set());
       setSaved(false);
+      setLastReplyTruncated(result.truncated);
       return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't reach the drafting agent");
@@ -276,6 +320,12 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
     } finally {
       setSending(false);
     }
+  }
+
+  // A cut-off reply's own continuation is appended as a further chat turn
+  // -- the agent picks up mid-thought rather than restarting the letter.
+  async function handleContinue() {
+    await sendToAgent("Please continue exactly where you left off -- don't repeat or restate anything already written.");
   }
 
   async function handleStart() {
@@ -391,6 +441,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
             piiMatches: [],
             reviewConfigured: (letter.reviewFlags?.length ?? 0) > 0,
             flags: letter.reviewFlags ?? [],
+            truncated: false,
           }
         : null,
     );
@@ -551,11 +602,23 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
             )}
           </div>
 
+          {lastReplyTruncated && !sending && (
+            <>
+              <p className="error" role="alert">
+                That reply looks like it was cut off mid-sentence (hit the model's length limit).
+              </p>
+              <div className="row-actions" style={{ marginBottom: 12 }}>
+                <button type="button" className="secondary" onClick={handleContinue}>
+                  <Icon name="add" /> Continue
+                </button>
+              </div>
+            </>
+          )}
+
           <form onSubmit={handleSend} className="chat-input-row">
-            <textarea
-              rows={2}
+            <AutoGrowTextarea
               value={chatInput}
-              onChange={(event) => setChatInput(event.target.value)}
+              onChange={setChatInput}
               placeholder="Reply to the drafting agent…"
               disabled={sending}
             />
@@ -600,6 +663,12 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                     scan above still ran.
                   </p>
                 )}
+                {review.truncated && (
+                  <p className="error" role="alert">
+                    This review looks like it was cut off mid-sentence (hit the model's length limit) — try Send to
+                    review again.
+                  </p>
+                )}
                 {review.flags.length > 0 && (
                   <ul className="review-list">
                     {review.flags.map((flag, i) => (
@@ -615,10 +684,9 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                 )}
                 <label className="edit-field" style={{ marginTop: review.flags.length > 0 ? 16 : 4, marginBottom: 12 }}>
                   <span>Feedback for the drafting agent (optional)</span>
-                  <textarea
-                    rows={2}
+                  <AutoGrowTextarea
                     value={feedbackText}
-                    onChange={(event) => setFeedbackText(event.target.value)}
+                    onChange={setFeedbackText}
                     placeholder="Check any points above the agent should address, or add anything else here — e.g. why a flag doesn't apply, or another change to make"
                     disabled={sending}
                   />

@@ -243,9 +243,9 @@ letters.post("/chat", async (c) => {
   ].join("\n\n");
 
   try {
-    const { text, usage } = await callClaude(c.env.ANTHROPIC_API_KEY, model, system, body.messages);
+    const { text, usage, truncated } = await callClaude(c.env.ANTHROPIC_API_KEY, model, system, body.messages);
     await logAiUsage(c.env.DB, "chat", model, usage);
-    return c.json({ reply: text });
+    return c.json({ reply: text, truncated });
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : "Could not reach the drafting agent" }, 502);
   }
@@ -282,7 +282,13 @@ letters.post("/review", async (c) => {
   const piiScan = scanForPii(draftBody);
 
   if (!c.env.ANTHROPIC_API_KEY) {
-    return c.json({ piiScanClean: piiScan.clean, piiMatches: piiScan.matches, reviewConfigured: false, flags: [] });
+    return c.json({
+      piiScanClean: piiScan.clean,
+      piiMatches: piiScan.matches,
+      reviewConfigured: false,
+      flags: [],
+      truncated: false,
+    });
   }
 
   const { model, complianceGuidelines: guidelines } = await getAccountAiSettings(c.env.DB);
@@ -313,7 +319,7 @@ letters.post("/review", async (c) => {
   ].join("\n\n");
 
   try {
-    const { text: raw, usage } = await callClaude(c.env.ANTHROPIC_API_KEY, model, system, [
+    const { text: raw, usage, truncated } = await callClaude(c.env.ANTHROPIC_API_KEY, model, system, [
       { role: "user", content: `Review this draft:\n\n${draftBody}` },
     ]);
     await logAiUsage(c.env.DB, "review", model, usage);
@@ -331,7 +337,7 @@ letters.post("/review", async (c) => {
         return { severity: "ok" as const, text: line };
       });
 
-    return c.json({ piiScanClean: piiScan.clean, piiMatches: piiScan.matches, reviewConfigured: true, flags });
+    return c.json({ piiScanClean: piiScan.clean, piiMatches: piiScan.matches, reviewConfigured: true, flags, truncated });
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : "Could not review the letter" }, 502);
   }

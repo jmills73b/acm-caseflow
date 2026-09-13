@@ -224,7 +224,12 @@ Notable business logic worth knowing about, not obvious from the route list alon
   feedback loop: each OK/CONCERN flag has a checkbox, there's a free-text box for
   anything else, and "Send feedback to agent" combines whatever's checked plus the
   free text into the next chat turn — same as typing it into the chat box yourself,
-  just without re-transcribing the flags.
+  just without re-transcribing the flags. Every `callClaude` call (`anthropic.ts`)
+  requests a 4096-token budget and reports whether the reply hit it (`stop_reason ===
+  "max_tokens"`) as `truncated` on both `/chat` and `/review`'s response — a cut-off
+  reply used to be returned silently (a real bug, at the old 1024-token cap a full
+  letter could easily run past); the UI now shows a clear notice with a "Continue"
+  button that asks the agent to pick back up rather than restart.
 
 ## Frontend
 

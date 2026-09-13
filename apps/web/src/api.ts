@@ -876,7 +876,7 @@ export function chatDraftLetter(input: {
   format: LetterFormat;
   personalFields: string[];
   messages: ChatMessage[];
-}): Promise<{ reply: string }> {
+}): Promise<{ reply: string; truncated: boolean }> {
   return request("/api/letters/chat", { method: "POST", body: JSON.stringify(input) });
 }
 
@@ -885,6 +885,7 @@ export interface ReviewLetterResult {
   piiMatches: PiiScanMatch[];
   reviewConfigured: boolean;
   flags: ReviewFlag[];
+  truncated: boolean;
 }
 
 // Passing the conversation lets the review agent check the draft against
