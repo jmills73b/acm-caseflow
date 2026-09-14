@@ -17,7 +17,7 @@ function claudeResponse(text: string, usage = { input_tokens: 42, output_tokens:
   );
 }
 
-interface LetterRow {
+interface StoredLetter {
   id: number;
   client_id: number;
   letter_type: string | null;
@@ -26,8 +26,15 @@ interface LetterRow {
   draft_body: string;
   review_flags: string | null;
   pii_scan_clean: number | null;
+  stage: string;
+  analysis_messages: string;
+  analysis_summary: string | null;
+  composition_messages: string;
+  review_rounds: string;
+  process_summary: string | null;
   created_by: number;
   created_at: string;
+  updated_at: string;
   deleted_at: string | null;
   deleted_by: number | null;
 }
@@ -44,7 +51,7 @@ function fakeEnv(
     apiKey?: string;
     clients?: Array<{ id: number; name: string }>;
     users?: Array<{ id: number; email: string }>;
-    letters?: LetterRow[];
+    letters?: StoredLetter[];
     complianceGuidelines?: string;
     aiModel?: string;
     aiUsage?: AiUsageRow[];
@@ -52,14 +59,14 @@ function fakeEnv(
 ): Env {
   const clients = options.clients ?? [{ id: 1, name: "Sarah Whitfield" }];
   const users = options.users ?? [{ id: 1, email: "anita@example.com" }];
-  const letterStore = new Map<number, LetterRow>((options.letters ?? []).map((l) => [l.id, l]));
+  const letterStore = new Map<number, StoredLetter>((options.letters ?? []).map((l) => [l.id, l]));
   let nextId = Math.max(0, ...[...letterStore.keys()]) + 1;
   const complianceGuidelines = options.complianceGuidelines ?? "";
   const aiModel = options.aiModel ?? null;
   // Not a copy -- tests pass their own array in to observe what gets logged.
   const aiUsageRows: AiUsageRow[] = options.aiUsage ?? [];
 
-  function enrich(row: LetterRow) {
+  function enrich(row: StoredLetter) {
     return {
       id: row.id,
       client_id: row.client_id,
@@ -70,8 +77,15 @@ function fakeEnv(
       draft_body: row.draft_body,
       review_flags: row.review_flags,
       pii_scan_clean: row.pii_scan_clean,
+      stage: row.stage,
+      analysis_messages: row.analysis_messages,
+      analysis_summary: row.analysis_summary,
+      composition_messages: row.composition_messages,
+      review_rounds: row.review_rounds,
+      process_summary: row.process_summary,
       created_by_email: users.find((u) => u.id === row.created_by)?.email ?? "",
       created_at: row.created_at,
+      updated_at: row.updated_at,
     };
   }
 
@@ -95,17 +109,14 @@ function fakeEnv(
               return (clients.some((c) => c.id === id) ? { id } : null) as T;
             }
             if (sql.includes("INSERT INTO letters")) {
-              const [clientId, letterType, format, personalFields, draftBody, reviewFlags, piiScanClean, createdBy] =
-                boundArgs as [
-                  number,
-                  string | null,
-                  string,
-                  string,
-                  string,
-                  string | null,
-                  number | null,
-                  number,
-                ];
+              const [clientId, letterType, format, personalFields, createdBy, updatedAt] = boundArgs as [
+                number,
+                string,
+                string,
+                string,
+                number,
+                string,
+              ];
               const id = nextId++;
               letterStore.set(id, {
                 id,
@@ -113,20 +124,27 @@ function fakeEnv(
                 letter_type: letterType,
                 format,
                 personal_fields: personalFields,
-                draft_body: draftBody,
-                review_flags: reviewFlags,
-                pii_scan_clean: piiScanClean,
+                draft_body: "",
+                review_flags: null,
+                pii_scan_clean: null,
+                stage: "analysis",
+                analysis_messages: "[]",
+                analysis_summary: null,
+                composition_messages: "[]",
+                review_rounds: "[]",
+                process_summary: null,
                 created_by: createdBy,
-                created_at: "2026-09-12T12:00:00.000Z",
+                created_at: updatedAt,
+                updated_at: updatedAt,
                 deleted_at: null,
                 deleted_by: null,
               });
               return { id } as T;
             }
-            if (sql.includes("WHERE letters.id = ?")) {
+            if (sql.includes("WHERE letters.id = ? AND letters.deleted_at IS NULL")) {
               const [id] = boundArgs as [number];
               const row = letterStore.get(id);
-              return (row ? enrich(row) : null) as T;
+              return (row && row.deleted_at === null ? enrich(row) : null) as T;
             }
             return null;
           },
@@ -176,28 +194,36 @@ function fakeEnv(
               const [deletedBy, id] = boundArgs as [number, number];
               const row = letterStore.get(id);
               if (!row || row.deleted_at !== null) return { success: true, meta: { changes: 0 } };
-              row.deleted_at = "2026-09-12T13:00:00.000Z";
+              row.deleted_at = "2026-09-14T13:00:00.000Z";
               row.deleted_by = deletedBy;
               return { success: true, meta: { changes: 1 } };
             }
-            if (sql.includes("UPDATE letters SET letter_type")) {
-              const [letterType, format, personalFields, draftBody, reviewFlags, piiScanClean, id] = boundArgs as [
-                string | null,
-                string,
-                string,
-                string,
-                string | null,
-                number | null,
-                number,
-              ];
+            if (sql.includes("UPDATE letters SET stage = ?")) {
+              const [
+                stage,
+                analysisMessages,
+                analysisSummary,
+                compositionMessages,
+                reviewRounds,
+                processSummary,
+                draftBody,
+                reviewFlags,
+                piiScanClean,
+                updatedAt,
+                id,
+              ] = boundArgs as [string, string, string | null, string, string, string | null, string, string | null, number | null, string, number];
               const row = letterStore.get(id);
               if (!row || row.deleted_at !== null) return { success: true, meta: { changes: 0 } };
-              row.letter_type = letterType;
-              row.format = format;
-              row.personal_fields = personalFields;
+              row.stage = stage;
+              row.analysis_messages = analysisMessages;
+              row.analysis_summary = analysisSummary;
+              row.composition_messages = compositionMessages;
+              row.review_rounds = reviewRounds;
+              row.process_summary = processSummary;
               row.draft_body = draftBody;
               row.review_flags = reviewFlags;
               row.pii_scan_clean = piiScanClean;
+              row.updated_at = updatedAt;
               return { success: true, meta: { changes: 1 } };
             }
             return { success: true, meta: {} };
@@ -209,8 +235,121 @@ function fakeEnv(
   };
 }
 
+function baseLetter(overrides: Partial<StoredLetter> = {}): StoredLetter {
+  return {
+    id: 1,
+    client_id: 1,
+    letter_type: "Fee estimate cover letter",
+    format: "letter",
+    personal_fields: JSON.stringify(["CLIENT_NAME"]),
+    draft_body: "",
+    review_flags: null,
+    pii_scan_clean: null,
+    stage: "analysis",
+    analysis_messages: "[]",
+    analysis_summary: null,
+    composition_messages: "[]",
+    review_rounds: "[]",
+    process_summary: null,
+    created_by: 1,
+    created_at: "2026-09-14T12:00:00.000Z",
+    updated_at: "2026-09-14T12:00:00.000Z",
+    deleted_at: null,
+    deleted_by: null,
+    ...overrides,
+  };
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("POST /api/letters", () => {
+  it("rejects a missing clientId", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ letterType: "Fee estimate" }) },
+      fakeEnv(),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects a missing letterType", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ clientId: 1 }) },
+      fakeEnv(),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects an invalid format", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters",
+      {
+        method: "POST",
+        headers: { Cookie: cookie },
+        body: JSON.stringify({ clientId: 1, letterType: "Fee estimate", format: "fax" }),
+      },
+      fakeEnv(),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("404s for an unknown client", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ clientId: 99, letterType: "Fee estimate" }) },
+      fakeEnv(),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("creates a session at the analysis stage with an empty draft", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters",
+      {
+        method: "POST",
+        headers: { Cookie: cookie },
+        body: JSON.stringify({
+          clientId: 1,
+          letterType: "Fee estimate cover letter",
+          format: "email",
+          personalFields: ["CLIENT_NAME"],
+        }),
+      },
+      fakeEnv(),
+    );
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      clientName: "Sarah Whitfield",
+      letterType: "Fee estimate cover letter",
+      format: "email",
+      stage: "analysis",
+      draftBody: "",
+      analysisMessages: [],
+      compositionMessages: [],
+      reviewRounds: [],
+      analysisSummary: null,
+      processSummary: null,
+    });
+  });
+
+  it("defaults format to letter when omitted", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ clientId: 1, letterType: "Fee estimate" }) },
+      fakeEnv(),
+    );
+    expect((await res.json()).format).toBe("letter");
+  });
 });
 
 describe("GET /api/letters", () => {
@@ -219,398 +358,556 @@ describe("GET /api/letters", () => {
     expect(res.status).toBe(401);
   });
 
-  it("lists non-deleted letters for a client", async () => {
+  it("lists non-deleted letters for a client without their message histories", async () => {
     const cookie = await sessionCookie();
     const res = await app.request(
       "/api/letters?clientId=1",
       { headers: { Cookie: cookie } },
+      fakeEnv({ letters: [baseLetter({ stage: "composition", analysis_messages: JSON.stringify([{ role: "user", content: "hi" }]) })] }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toHaveLength(1);
+    expect(body[0]).toMatchObject({ clientName: "Sarah Whitfield", stage: "composition" });
+    expect(body[0].analysisMessages).toBeUndefined();
+  });
+});
+
+describe("GET /api/letters/:id", () => {
+  it("returns full detail including message histories", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters/1",
+      { headers: { Cookie: cookie } },
       fakeEnv({
         letters: [
-          {
-            id: 1,
-            client_id: 1,
-            letter_type: "Fee estimate cover letter",
-            format: "letter",
-            personal_fields: JSON.stringify(["CLIENT_NAME"]),
-            draft_body: "Dear {{CLIENT_NAME}},",
-            review_flags: null,
-            pii_scan_clean: 1,
-            created_by: 1,
-            created_at: "2026-09-12T12:00:00.000Z",
-            deleted_at: null,
-            deleted_by: null,
-          },
+          baseLetter({
+            stage: "composition",
+            analysis_messages: JSON.stringify([{ role: "user", content: "The facts are..." }]),
+            analysis_summary: "Key facts: ...",
+          }),
         ],
       }),
     );
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toHaveLength(1);
-    expect(body[0]).toMatchObject({ clientName: "Sarah Whitfield", letterType: "Fee estimate cover letter" });
+    expect(body.analysisMessages).toEqual([{ role: "user", content: "The facts are..." }]);
+    expect(body.analysisSummary).toBe("Key facts: ...");
+  });
+
+  it("404s for an unknown letter", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request("/api/letters/99", { headers: { Cookie: cookie } }, fakeEnv());
+    expect(res.status).toBe(404);
   });
 });
 
-describe("POST /api/letters/chat", () => {
-  const validBody = {
-    letterType: "Fee estimate cover letter for the ancillary relief matter",
-    personalFields: ["CLIENT_NAME"],
-    messages: [{ role: "user", content: "Please draft this letter." }],
-  };
-
+describe("POST /api/letters/:id/analysis", () => {
   it("reports not configured when ANTHROPIC_API_KEY is missing", async () => {
     const cookie = await sessionCookie();
     const res = await app.request(
-      "/api/letters/chat",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify(validBody) },
-      fakeEnv(),
+      "/api/letters/1/analysis",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ message: "Here are the facts." }) },
+      fakeEnv({ letters: [baseLetter()] }),
     );
     expect(res.status).toBe(500);
   });
 
-  it("rejects a missing letterType", async () => {
+  it("rejects an empty message", async () => {
     const cookie = await sessionCookie();
     const res = await app.request(
-      "/api/letters/chat",
-      {
-        method: "POST",
-        headers: { Cookie: cookie },
-        body: JSON.stringify({ ...validBody, letterType: undefined }),
-      },
-      fakeEnv({ apiKey: API_KEY }),
+      "/api/letters/1/analysis",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ message: "  " }) },
+      fakeEnv({ apiKey: API_KEY, letters: [baseLetter()] }),
     );
     expect(res.status).toBe(400);
   });
 
-  it("rejects an empty messages array", async () => {
+  it("rejects a letter that isn't in the analysis stage", async () => {
     const cookie = await sessionCookie();
     const res = await app.request(
-      "/api/letters/chat",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ ...validBody, messages: [] }) },
-      fakeEnv({ apiKey: API_KEY }),
+      "/api/letters/1/analysis",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ message: "More facts." }) },
+      fakeEnv({ apiKey: API_KEY, letters: [baseLetter({ stage: "composition" })] }),
     );
     expect(res.status).toBe(400);
   });
 
-  it("rejects messages that don't end with a user turn", async () => {
+  it("appends the exchange to analysis_messages and stays in the analysis stage", async () => {
     const cookie = await sessionCookie();
+    vi.stubGlobal("fetch", vi.fn(async () => claudeResponse("What is the client's objective?")));
     const res = await app.request(
-      "/api/letters/chat",
-      {
-        method: "POST",
-        headers: { Cookie: cookie },
-        body: JSON.stringify({
-          ...validBody,
-          messages: [
-            { role: "user", content: "Please draft this letter." },
-            { role: "assistant", content: "What amount should I include?" },
-          ],
-        }),
-      },
-      fakeEnv({ apiKey: API_KEY }),
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it("returns the drafting agent's reply", async () => {
-    const cookie = await sessionCookie();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => claudeResponse("Dear {{CLIENT_NAME}},\n\nThank you.")),
-    );
-    const res = await app.request(
-      "/api/letters/chat",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify(validBody) },
-      fakeEnv({ apiKey: API_KEY }),
+      "/api/letters/1/analysis",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ message: "The other party has filed a Form E." }) },
+      fakeEnv({ apiKey: API_KEY, letters: [baseLetter()] }),
     );
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.reply).toContain("{{CLIENT_NAME}}");
+    expect(body.letter.stage).toBe("analysis");
+    expect(body.letter.analysisMessages).toEqual([
+      { role: "user", content: "The other party has filed a Form E." },
+      { role: "assistant", content: "What is the client's objective?" },
+    ]);
     expect(body.truncated).toBe(false);
   });
 
-  it("flags a reply that was cut off by hitting the token limit", async () => {
+  it("frames the analyst as UK family law and forbids drafting in this stage", async () => {
     const cookie = await sessionCookie();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => claudeResponse("Dear {{CLIENT_NAME}}, this letter concerns the ongoing", undefined, "max_tokens")),
-    );
-    const res = await app.request(
-      "/api/letters/chat",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify(validBody) },
-      fakeEnv({ apiKey: API_KEY }),
-    );
-    expect(res.status).toBe(200);
-    expect((await res.json()).truncated).toBe(true);
-  });
-
-  it("requests a generous token budget so a full letter isn't cut off", async () => {
-    const cookie = await sessionCookie();
-    const fetchMock = vi.fn(async () => claudeResponse("Dear {{CLIENT_NAME}},"));
+    const fetchMock = vi.fn(async () => claudeResponse("Understood."));
     vi.stubGlobal("fetch", fetchMock);
     await app.request(
-      "/api/letters/chat",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify(validBody) },
-      fakeEnv({ apiKey: API_KEY }),
-    );
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body).max_tokens).toBeGreaterThanOrEqual(4096);
-  });
-
-  it("carries the full conversation through to the Anthropic call", async () => {
-    const cookie = await sessionCookie();
-    const fetchMock = vi.fn(async () => claudeResponse("Dear {{CLIENT_NAME}}, following up as discussed."));
-    vi.stubGlobal("fetch", fetchMock);
-    const conversation = {
-      ...validBody,
-      messages: [
-        { role: "user", content: "Please draft this letter." },
-        { role: "assistant", content: "What tone would you like?" },
-        { role: "user", content: "Warm but professional." },
-      ],
-    };
-    const res = await app.request(
-      "/api/letters/chat",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify(conversation) },
-      fakeEnv({ apiKey: API_KEY }),
-    );
-    expect(res.status).toBe(200);
-    const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(sentBody.messages).toEqual(conversation.messages);
-  });
-
-  it("surfaces an error when the Anthropic API call fails", async () => {
-    const cookie = await sessionCookie();
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 500 })));
-    const res = await app.request(
-      "/api/letters/chat",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify(validBody) },
-      fakeEnv({ apiKey: API_KEY }),
-    );
-    expect(res.status).toBe(502);
-  });
-
-  it("sends the account's configured AI model to Anthropic, defaulting to Haiku 4.5", async () => {
-    const cookie = await sessionCookie();
-    const fetchMock = vi.fn(async () => claudeResponse("Dear {{CLIENT_NAME}},"));
-    vi.stubGlobal("fetch", fetchMock);
-    await app.request(
-      "/api/letters/chat",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify(validBody) },
-      fakeEnv({ apiKey: API_KEY, aiModel: "claude-sonnet-5" }),
-    );
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body).model).toBe("claude-sonnet-5");
-
-    const fetchMockDefault = vi.fn(async () => claudeResponse("Dear {{CLIENT_NAME}},"));
-    vi.stubGlobal("fetch", fetchMockDefault);
-    await app.request(
-      "/api/letters/chat",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify(validBody) },
-      fakeEnv({ apiKey: API_KEY }),
-    );
-    expect(JSON.parse(fetchMockDefault.mock.calls[0][1].body).model).toBe("claude-haiku-4-5");
-  });
-
-  it("rejects an invalid format", async () => {
-    const cookie = await sessionCookie();
-    const res = await app.request(
-      "/api/letters/chat",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ ...validBody, format: "fax" }) },
-      fakeEnv({ apiKey: API_KEY }),
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it("asks for an email with a subject line when format is email", async () => {
-    const cookie = await sessionCookie();
-    const fetchMock = vi.fn(async () => claudeResponse("Subject: Fee estimate\n\nDear {{CLIENT_NAME}},"));
-    vi.stubGlobal("fetch", fetchMock);
-    const res = await app.request(
-      "/api/letters/chat",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ ...validBody, format: "email" }) },
-      fakeEnv({ apiKey: API_KEY }),
-    );
-    expect(res.status).toBe(200);
-    const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(sentBody.system).toContain("drafting an email");
-    expect(sentBody.system).toContain("Subject:");
-  });
-
-  it("instructs the drafting agent to analyse before drafting", async () => {
-    const cookie = await sessionCookie();
-    const fetchMock = vi.fn(async () => claudeResponse("Dear {{CLIENT_NAME}},"));
-    vi.stubGlobal("fetch", fetchMock);
-    await app.request(
-      "/api/letters/chat",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify(validBody) },
-      fakeEnv({ apiKey: API_KEY }),
+      "/api/letters/1/analysis",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ message: "Facts." }) },
+      fakeEnv({ apiKey: API_KEY, letters: [baseLetter()] }),
     );
     const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(sentBody.system).toContain("legal issues raised");
-    expect(sentBody.system).toContain("Don't include this analysis in your reply");
+    expect(sentBody.system).toContain("UK family law");
+    expect(sentBody.system).toContain("Never draft the actual letter or email text in this stage");
   });
 
-  it("logs the call's token usage against the model used", async () => {
+  it("flags a truncated reply and logs usage against the analysis endpoint", async () => {
     const cookie = await sessionCookie();
     const aiUsage: AiUsageRow[] = [];
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => claudeResponse("Dear {{CLIENT_NAME}},", { input_tokens: 120, output_tokens: 60 })),
+      vi.fn(async () => claudeResponse("What is the...", { input_tokens: 10, output_tokens: 5 }, "max_tokens")),
     );
     const res = await app.request(
-      "/api/letters/chat",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify(validBody) },
-      fakeEnv({ apiKey: API_KEY, aiModel: "claude-sonnet-5", aiUsage }),
+      "/api/letters/1/analysis",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ message: "Facts." }) },
+      fakeEnv({ apiKey: API_KEY, letters: [baseLetter()], aiUsage }),
     );
-    expect(res.status).toBe(200);
-    expect(aiUsage).toEqual([
-      { endpoint: "chat", model: "claude-sonnet-5", input_tokens: 120, output_tokens: 60 },
-    ]);
+    expect((await res.json()).truncated).toBe(true);
+    expect(aiUsage).toEqual([{ endpoint: "analysis", model: "claude-haiku-4-5", input_tokens: 10, output_tokens: 5 }]);
   });
 });
 
-describe("POST /api/letters/review", () => {
-  it("rejects a missing draftBody", async () => {
+describe("POST /api/letters/:id/analysis/summarize", () => {
+  it("rejects when there's nothing to summarise yet", async () => {
     const cookie = await sessionCookie();
     const res = await app.request(
-      "/api/letters/review",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({}) },
-      fakeEnv(),
+      "/api/letters/1/analysis/summarize",
+      { method: "POST", headers: { Cookie: cookie } },
+      fakeEnv({ apiKey: API_KEY, letters: [baseLetter()] }),
     );
     expect(res.status).toBe(400);
   });
 
-  it("always runs the deterministic PII scan, even without an API key", async () => {
+  it("rejects a letter not in the analysis stage", async () => {
     const cookie = await sessionCookie();
     const res = await app.request(
-      "/api/letters/review",
-      {
-        method: "POST",
-        headers: { Cookie: cookie },
-        body: JSON.stringify({ draftBody: "Contact sarah@example.com for details." }),
-      },
-      fakeEnv(),
+      "/api/letters/1/analysis/summarize",
+      { method: "POST", headers: { Cookie: cookie } },
+      fakeEnv({
+        apiKey: API_KEY,
+        letters: [baseLetter({ stage: "composition", analysis_messages: JSON.stringify([{ role: "user", content: "hi" }]) })],
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("generates the Analysis Summary and transitions to composition", async () => {
+    const cookie = await sessionCookie();
+    vi.stubGlobal("fetch", vi.fn(async () => claudeResponse("Key facts: ...\nClient objective: ...")));
+    const res = await app.request(
+      "/api/letters/1/analysis/summarize",
+      { method: "POST", headers: { Cookie: cookie } },
+      fakeEnv({
+        apiKey: API_KEY,
+        letters: [baseLetter({ analysis_messages: JSON.stringify([{ role: "user", content: "The other party has filed a Form E." }]) })],
+      }),
     );
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.piiScanClean).toBe(false);
-    expect(body.reviewConfigured).toBe(false);
-    expect(body.flags).toEqual([]);
+    expect(body.letter.stage).toBe("composition");
+    expect(body.letter.analysisSummary).toContain("Key facts");
   });
+});
 
-  it("reports the scan clean for a letter using only placeholder tokens", async () => {
+describe("POST /api/letters/:id/composition", () => {
+  it("rejects a letter not in the composition stage", async () => {
     const cookie = await sessionCookie();
     const res = await app.request(
-      "/api/letters/review",
-      {
-        method: "POST",
-        headers: { Cookie: cookie },
-        body: JSON.stringify({ draftBody: "Dear {{CLIENT_NAME}}, thank you." }),
-      },
-      fakeEnv(),
+      "/api/letters/1/composition",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ message: "Please draft it." }) },
+      fakeEnv({ apiKey: API_KEY, letters: [baseLetter()] }),
     );
-    const body = await res.json();
-    expect(body.piiScanClean).toBe(true);
+    expect(res.status).toBe(400);
   });
 
-  it("parses OK/CONCERN lines from the review agent into flags", async () => {
+  it("drafts using the Analysis Summary and sets draftBody from the reply", async () => {
+    const cookie = await sessionCookie();
+    vi.stubGlobal("fetch", vi.fn(async () => claudeResponse("Dear {{CLIENT_NAME}}, thank you.")));
+    const res = await app.request(
+      "/api/letters/1/composition",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ message: "Please draft it." }) },
+      fakeEnv({
+        apiKey: API_KEY,
+        letters: [baseLetter({ stage: "composition", analysis_summary: "Key facts: the client wants a fee estimate." })],
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.letter.draftBody).toBe("Dear {{CLIENT_NAME}}, thank you.");
+    expect(body.letter.stage).toBe("composition");
+  });
+
+  it("passes the Analysis Summary into the drafting agent's system prompt", async () => {
+    const cookie = await sessionCookie();
+    const fetchMock = vi.fn(async () => claudeResponse("Dear {{CLIENT_NAME}},"));
+    vi.stubGlobal("fetch", fetchMock);
+    await app.request(
+      "/api/letters/1/composition",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ message: "Draft it." }) },
+      fakeEnv({ apiKey: API_KEY, letters: [baseLetter({ stage: "composition", analysis_summary: "Key facts: XYZ." })] }),
+    );
+    const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(sentBody.system).toContain("Key facts: XYZ.");
+  });
+
+  it("asks for a subject line when format is email", async () => {
+    const cookie = await sessionCookie();
+    const fetchMock = vi.fn(async () => claudeResponse("Subject: Fee estimate\n\nDear {{CLIENT_NAME}},"));
+    vi.stubGlobal("fetch", fetchMock);
+    await app.request(
+      "/api/letters/1/composition",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ message: "Draft it." }) },
+      fakeEnv({ apiKey: API_KEY, letters: [baseLetter({ stage: "composition", format: "email" })] }),
+    );
+    const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(sentBody.system).toContain("drafting an email");
+    expect(sentBody.system).toContain("Subject:");
+  });
+});
+
+describe("POST /api/letters/:id/review", () => {
+  it("rejects a letter with nothing drafted yet", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters/1/review",
+      { method: "POST", headers: { Cookie: cookie } },
+      fakeEnv({ letters: [baseLetter({ stage: "composition", draft_body: "" })] }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("always runs the deterministic PII scan and appends a round, even without an API key", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters/1/review",
+      { method: "POST", headers: { Cookie: cookie } },
+      fakeEnv({ letters: [baseLetter({ stage: "composition", draft_body: "Contact sarah@example.com for details." })] }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.letter.stage).toBe("review");
+    expect(body.letter.reviewRounds).toHaveLength(1);
+    expect(body.letter.reviewRounds[0].piiScanClean).toBe(false);
+    expect(body.letter.reviewRounds[0].reviewConfigured).toBe(false);
+  });
+
+  it("parses OK/CONCERN lines into flags for the round and mirrors them onto the legacy columns", async () => {
     const cookie = await sessionCookie();
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => claudeResponse("OK: Tone is appropriate.\nCONCERN: Doesn't mention the estimate expiry.")),
     );
     const res = await app.request(
-      "/api/letters/review",
-      {
-        method: "POST",
-        headers: { Cookie: cookie },
-        body: JSON.stringify({ draftBody: "Dear {{CLIENT_NAME}}, this is an estimate." }),
-      },
-      fakeEnv({ apiKey: API_KEY, complianceGuidelines: "State estimate validity." }),
+      "/api/letters/1/review",
+      { method: "POST", headers: { Cookie: cookie } },
+      fakeEnv({
+        apiKey: API_KEY,
+        letters: [baseLetter({ stage: "composition", draft_body: "Dear {{CLIENT_NAME}}, this is an estimate." })],
+      }),
     );
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.reviewConfigured).toBe(true);
-    expect(body.flags).toEqual([
+    expect(body.letter.reviewRounds[0].flags).toEqual([
       { severity: "ok", text: "Tone is appropriate." },
       { severity: "concern", text: "Doesn't mention the estimate expiry." },
     ]);
-    expect(body.truncated).toBe(false);
+    expect(body.letter.reviewFlags).toEqual(body.letter.reviewRounds[0].flags);
   });
 
-  it("flags a review response that was cut off by hitting the token limit", async () => {
+  it("appends a second round rather than replacing the first when reviewed again", async () => {
     const cookie = await sessionCookie();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => claudeResponse("OK: Tone is appropriate.\nCONCERN: Doesn't mention the", undefined, "max_tokens")),
-    );
+    vi.stubGlobal("fetch", vi.fn(async () => claudeResponse("OK: Fine.")));
+    const existingRound = {
+      createdAt: "2026-09-14T12:30:00.000Z",
+      draftSnapshot: "Old draft",
+      piiScanClean: true,
+      piiMatches: [],
+      reviewConfigured: true,
+      truncated: false,
+      flags: [{ severity: "concern", text: "Old concern." }],
+      selectedFlagTexts: ["Old concern."],
+      feedbackText: null,
+      respondedAt: "2026-09-14T12:35:00.000Z",
+    };
     const res = await app.request(
-      "/api/letters/review",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ draftBody: "Dear {{CLIENT_NAME}}," }) },
-      fakeEnv({ apiKey: API_KEY }),
+      "/api/letters/1/review",
+      { method: "POST", headers: { Cookie: cookie } },
+      fakeEnv({
+        apiKey: API_KEY,
+        letters: [
+          baseLetter({
+            stage: "composition",
+            draft_body: "Dear {{CLIENT_NAME}}, revised.",
+            review_rounds: JSON.stringify([existingRound]),
+          }),
+        ],
+      }),
     );
-    expect(res.status).toBe(200);
-    expect((await res.json()).truncated).toBe(true);
+    const body = await res.json();
+    expect(body.letter.reviewRounds).toHaveLength(2);
+    expect(body.letter.reviewRounds[0]).toMatchObject({ draftSnapshot: "Old draft" });
   });
 
-  it("includes the drafting conversation in the reviewer's system prompt when provided", async () => {
-    const cookie = await sessionCookie();
-    const fetchMock = vi.fn(async () => claudeResponse("OK: Fine."));
-    vi.stubGlobal("fetch", fetchMock);
-    const res = await app.request(
-      "/api/letters/review",
-      {
-        method: "POST",
-        headers: { Cookie: cookie },
-        body: JSON.stringify({
-          draftBody: "Dear {{CLIENT_NAME}}, the estimate is £500.",
-          messages: [
-            { role: "user", content: "I need to write: fee estimate letter" },
-            { role: "assistant", content: "What's the estimate amount?" },
-            { role: "user", content: "£450" },
-          ],
-        }),
-      },
-      fakeEnv({ apiKey: API_KEY }),
-    );
-    expect(res.status).toBe(200);
-    const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(sentBody.system).toContain("supervising solicitor");
-    expect(sentBody.system).toContain("Drafting conversation:");
-    expect(sentBody.system).toContain("£450");
-  });
-
-  it("tells the reviewer no conversation was provided when messages are omitted", async () => {
+  it("includes the Analysis Summary and drafting conversation in the reviewer's system prompt", async () => {
     const cookie = await sessionCookie();
     const fetchMock = vi.fn(async () => claudeResponse("OK: Fine."));
     vi.stubGlobal("fetch", fetchMock);
     await app.request(
-      "/api/letters/review",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ draftBody: "Dear {{CLIENT_NAME}}," }) },
-      fakeEnv({ apiKey: API_KEY }),
+      "/api/letters/1/review",
+      { method: "POST", headers: { Cookie: cookie } },
+      fakeEnv({
+        apiKey: API_KEY,
+        letters: [
+          baseLetter({
+            stage: "composition",
+            draft_body: "Dear {{CLIENT_NAME}}, the estimate is £500.",
+            analysis_summary: "Key facts: the estimate is £450.",
+            composition_messages: JSON.stringify([
+              { role: "user", content: "Please draft it." },
+              { role: "assistant", content: "Dear {{CLIENT_NAME}}, the estimate is £500." },
+            ]),
+          }),
+        ],
+      }),
     );
     const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(sentBody.system).toContain("No drafting conversation was provided");
+    expect(sentBody.system).toContain("supervising solicitor");
+    expect(sentBody.system).toContain("Key facts: the estimate is £450.");
+    expect(sentBody.system).toContain("Drafting conversation:");
+  });
+});
+
+describe("POST /api/letters/:id/review/feedback", () => {
+  const round = {
+    createdAt: "2026-09-14T12:30:00.000Z",
+    draftSnapshot: "Dear {{CLIENT_NAME}}, draft one.",
+    piiScanClean: true,
+    piiMatches: [],
+    reviewConfigured: true,
+    truncated: false,
+    flags: [
+      { severity: "ok", text: "Tone is fine." },
+      { severity: "concern", text: "Doesn't mention the estimate expiry." },
+    ],
+    selectedFlagTexts: null,
+    feedbackText: null,
+    respondedAt: null,
+  };
+
+  it("rejects when no flags are selected and no feedback text is given", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters/1/review/feedback",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ selectedFlagIndexes: [] }) },
+      fakeEnv({
+        apiKey: API_KEY,
+        letters: [baseLetter({ stage: "review", draft_body: "Dear {{CLIENT_NAME}}, draft one.", review_rounds: JSON.stringify([round]) })],
+      }),
+    );
+    expect(res.status).toBe(400);
   });
 
-  it("logs the review call's token usage", async () => {
+  it("rejects a letter not in the review stage", async () => {
     const cookie = await sessionCookie();
-    const aiUsage: AiUsageRow[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => claudeResponse("OK: Fine.", { input_tokens: 30, output_tokens: 10 })),
-    );
     const res = await app.request(
-      "/api/letters/review",
+      "/api/letters/1/review/feedback",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ feedbackText: "Fix it." }) },
+      fakeEnv({ apiKey: API_KEY, letters: [baseLetter({ stage: "composition" })] }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("records the selection and feedback on the round, forwards it as a drafting turn, and routes back to composition", async () => {
+    const cookie = await sessionCookie();
+    const fetchMock = vi.fn(async () => claudeResponse("Dear {{CLIENT_NAME}}, draft two, now mentioning expiry."));
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await app.request(
+      "/api/letters/1/review/feedback",
       {
         method: "POST",
         headers: { Cookie: cookie },
-        body: JSON.stringify({ draftBody: "Dear {{CLIENT_NAME}}," }),
+        body: JSON.stringify({ selectedFlagIndexes: [1], feedbackText: "Also mention the 30-day validity." }),
       },
-      fakeEnv({ apiKey: API_KEY, aiModel: "claude-haiku-4-5", aiUsage }),
+      fakeEnv({
+        apiKey: API_KEY,
+        letters: [baseLetter({ stage: "review", draft_body: "Dear {{CLIENT_NAME}}, draft one.", review_rounds: JSON.stringify([round]) })],
+      }),
     );
     expect(res.status).toBe(200);
-    expect(aiUsage).toEqual([
-      { endpoint: "review", model: "claude-haiku-4-5", input_tokens: 30, output_tokens: 10 },
-    ]);
+    const body = await res.json();
+    expect(body.letter.stage).toBe("composition");
+    expect(body.letter.draftBody).toBe("Dear {{CLIENT_NAME}}, draft two, now mentioning expiry.");
+    expect(body.letter.reviewRounds[0].selectedFlagTexts).toEqual(["Doesn't mention the estimate expiry."]);
+    expect(body.letter.reviewRounds[0].feedbackText).toBe("Also mention the 30-day validity.");
+    expect(body.letter.reviewRounds[0].respondedAt).not.toBeNull();
+
+    const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+    const lastMessage = sentBody.messages[sentBody.messages.length - 1];
+    expect(lastMessage.content).toContain("Doesn't mention the estimate expiry.");
+    expect(lastMessage.content).toContain("Also mention the 30-day validity.");
+  });
+});
+
+describe("POST /api/letters/:id/back", () => {
+  it("rejects an invalid target stage", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters/1/back",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ stage: "review" }) },
+      fakeEnv({ letters: [baseLetter({ stage: "composition" })] }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects going back on an already-finalized letter", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters/1/back",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ stage: "composition" }) },
+      fakeEnv({ letters: [baseLetter({ stage: "finalized", draft_body: "Final." })] }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("moves the stage pointer without touching any message history", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters/1/back",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ stage: "analysis" }) },
+      fakeEnv({
+        letters: [
+          baseLetter({
+            stage: "review",
+            draft_body: "Dear {{CLIENT_NAME}},",
+            analysis_messages: JSON.stringify([{ role: "user", content: "Facts." }]),
+          }),
+        ],
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.letter.stage).toBe("analysis");
+    expect(body.letter.analysisMessages).toEqual([{ role: "user", content: "Facts." }]);
+    expect(body.letter.draftBody).toBe("Dear {{CLIENT_NAME}},");
+  });
+});
+
+describe("POST /api/letters/:id/finalize", () => {
+  it("rejects a letter with nothing drafted", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters/1/finalize",
+      { method: "POST", headers: { Cookie: cookie } },
+      fakeEnv({ letters: [baseLetter({ draft_body: "" })] }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("finalizes without a process summary when the AI isn't configured", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters/1/finalize",
+      { method: "POST", headers: { Cookie: cookie } },
+      fakeEnv({ letters: [baseLetter({ stage: "review", draft_body: "Dear {{CLIENT_NAME}}," })] }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.letter.stage).toBe("finalized");
+    expect(body.letter.processSummary).toBeNull();
+  });
+
+  it("generates an AI-written narrative process summary and mirrors the last round onto the legacy columns", async () => {
+    const cookie = await sessionCookie();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => claudeResponse("The analyst established the key facts, then the draft went through one revision.")),
+    );
+    const round = {
+      createdAt: "2026-09-14T12:30:00.000Z",
+      draftSnapshot: "Dear {{CLIENT_NAME}},",
+      piiScanClean: true,
+      piiMatches: [],
+      reviewConfigured: true,
+      truncated: false,
+      flags: [{ severity: "ok", text: "Fine." }],
+      selectedFlagTexts: null,
+      feedbackText: null,
+      respondedAt: null,
+    };
+    const res = await app.request(
+      "/api/letters/1/finalize",
+      { method: "POST", headers: { Cookie: cookie } },
+      fakeEnv({
+        apiKey: API_KEY,
+        letters: [baseLetter({ stage: "review", draft_body: "Dear {{CLIENT_NAME}},", review_rounds: JSON.stringify([round]) })],
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.letter.stage).toBe("finalized");
+    expect(body.letter.processSummary).toContain("key facts");
+    expect(body.letter.reviewFlags).toEqual([{ severity: "ok", text: "Fine." }]);
+    expect(body.letter.piiScanClean).toBe(true);
+  });
+
+  it("logs the finalize call's usage against the finalize-summary endpoint", async () => {
+    const cookie = await sessionCookie();
+    const aiUsage: AiUsageRow[] = [];
+    vi.stubGlobal("fetch", vi.fn(async () => claudeResponse("Narrative.", { input_tokens: 20, output_tokens: 8 })));
+    await app.request(
+      "/api/letters/1/finalize",
+      { method: "POST", headers: { Cookie: cookie } },
+      fakeEnv({ apiKey: API_KEY, letters: [baseLetter({ stage: "review", draft_body: "Dear {{CLIENT_NAME}}," })], aiUsage }),
+    );
+    expect(aiUsage).toEqual([{ endpoint: "finalize-summary", model: "claude-haiku-4-5", input_tokens: 20, output_tokens: 8 }]);
+  });
+});
+
+describe("DELETE /api/letters/:id", () => {
+  it("404s when the letter doesn't exist or is already deleted", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request("/api/letters/99", { method: "DELETE", headers: { Cookie: cookie } }, fakeEnv());
+    expect(res.status).toBe(404);
+  });
+
+  it("soft-deletes an existing letter", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters/1",
+      { method: "DELETE", headers: { Cookie: cookie } },
+      fakeEnv({ letters: [baseLetter()] }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
+});
+
+describe("GET /api/letters/deleted", () => {
+  it("lists soft-deleted letters with who deleted them", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters/deleted",
+      { headers: { Cookie: cookie } },
+      fakeEnv({ letters: [baseLetter({ deleted_at: "2026-09-14T13:00:00.000Z", deleted_by: 1 })] }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body[0]).toMatchObject({ deletedByEmail: "anita@example.com" });
   });
 });
 
@@ -639,9 +936,9 @@ describe("GET /api/letters/usage", () => {
       { headers: { Cookie: cookie } },
       fakeEnv({
         aiUsage: [
-          { endpoint: "chat", model: "claude-haiku-4-5", input_tokens: 1_000_000, output_tokens: 1_000_000 },
+          { endpoint: "analysis", model: "claude-haiku-4-5", input_tokens: 1_000_000, output_tokens: 1_000_000 },
           { endpoint: "review", model: "claude-haiku-4-5", input_tokens: 1_000_000, output_tokens: 0 },
-          { endpoint: "chat", model: "claude-sonnet-5", input_tokens: 1_000_000, output_tokens: 1_000_000 },
+          { endpoint: "composition", model: "claude-sonnet-5", input_tokens: 1_000_000, output_tokens: 1_000_000 },
         ],
       }),
     );
@@ -649,225 +946,6 @@ describe("GET /api/letters/usage", () => {
     const body = await res.json();
     expect(body.totalInputTokens).toBe(3_000_000);
     expect(body.totalOutputTokens).toBe(2_000_000);
-    // Haiku 4.5: 2M in * $1/MTok + 1M out * $5/MTok = $7. Sonnet 5: 1M in * $2/MTok + 1M out * $10/MTok = $12.
     expect(body.estimatedCostUsd).toBeCloseTo(19, 5);
-    expect(body.byModel).toEqual(
-      expect.arrayContaining([
-        { model: "claude-haiku-4-5", inputTokens: 2_000_000, outputTokens: 1_000_000, estimatedCostUsd: 7 },
-        { model: "claude-sonnet-5", inputTokens: 1_000_000, outputTokens: 1_000_000, estimatedCostUsd: 12 },
-      ]),
-    );
-  });
-});
-
-describe("POST /api/letters", () => {
-  it("rejects a missing clientId", async () => {
-    const cookie = await sessionCookie();
-    const res = await app.request(
-      "/api/letters",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ draftBody: "Dear {{CLIENT_NAME}}," }) },
-      fakeEnv(),
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it("rejects a missing draftBody", async () => {
-    const cookie = await sessionCookie();
-    const res = await app.request(
-      "/api/letters",
-      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ clientId: 1 }) },
-      fakeEnv(),
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it("404s for an unknown client", async () => {
-    const cookie = await sessionCookie();
-    const res = await app.request(
-      "/api/letters",
-      {
-        method: "POST",
-        headers: { Cookie: cookie },
-        body: JSON.stringify({ clientId: 99, draftBody: "Dear {{CLIENT_NAME}}," }),
-      },
-      fakeEnv(),
-    );
-    expect(res.status).toBe(404);
-  });
-
-  it("saves a letter and returns it with the client name and letter type", async () => {
-    const cookie = await sessionCookie();
-    const res = await app.request(
-      "/api/letters",
-      {
-        method: "POST",
-        headers: { Cookie: cookie },
-        body: JSON.stringify({
-          clientId: 1,
-          letterType: "Fee estimate cover letter",
-          format: "email",
-          personalFields: ["CLIENT_NAME"],
-          draftBody: "Dear {{CLIENT_NAME}},",
-          reviewFlags: [{ severity: "ok", text: "Fine." }],
-          piiScanClean: true,
-        }),
-      },
-      fakeEnv(),
-    );
-    expect(res.status).toBe(201);
-    const body = await res.json();
-    expect(body).toMatchObject({
-      clientName: "Sarah Whitfield",
-      letterType: "Fee estimate cover letter",
-      format: "email",
-      draftBody: "Dear {{CLIENT_NAME}},",
-      piiScanClean: true,
-    });
-  });
-
-  it("defaults format to letter when omitted", async () => {
-    const cookie = await sessionCookie();
-    const res = await app.request(
-      "/api/letters",
-      {
-        method: "POST",
-        headers: { Cookie: cookie },
-        body: JSON.stringify({ clientId: 1, draftBody: "Dear {{CLIENT_NAME}}," }),
-      },
-      fakeEnv(),
-    );
-    expect((await res.json()).format).toBe("letter");
-  });
-
-  it("rejects an invalid format", async () => {
-    const cookie = await sessionCookie();
-    const res = await app.request(
-      "/api/letters",
-      {
-        method: "POST",
-        headers: { Cookie: cookie },
-        body: JSON.stringify({ clientId: 1, draftBody: "Dear {{CLIENT_NAME}},", format: "fax" }),
-      },
-      fakeEnv(),
-    );
-    expect(res.status).toBe(400);
-  });
-});
-
-describe("PATCH /api/letters/:id", () => {
-  const existing = {
-    id: 1,
-    client_id: 1,
-    letter_type: "Fee estimate cover letter",
-    format: "letter",
-    personal_fields: JSON.stringify(["CLIENT_NAME"]),
-    draft_body: "Dear {{CLIENT_NAME}}, first draft.",
-    review_flags: null,
-    pii_scan_clean: null,
-    created_by: 1,
-    created_at: "2026-09-12T12:00:00.000Z",
-    deleted_at: null,
-    deleted_by: null,
-  };
-
-  it("rejects a missing draftBody", async () => {
-    const cookie = await sessionCookie();
-    const res = await app.request(
-      "/api/letters/1",
-      { method: "PATCH", headers: { Cookie: cookie }, body: JSON.stringify({}) },
-      fakeEnv({ letters: [existing] }),
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it("rejects an invalid format", async () => {
-    const cookie = await sessionCookie();
-    const res = await app.request(
-      "/api/letters/1",
-      {
-        method: "PATCH",
-        headers: { Cookie: cookie },
-        body: JSON.stringify({ draftBody: "Revised.", format: "fax" }),
-      },
-      fakeEnv({ letters: [existing] }),
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it("404s for an unknown or already-deleted letter", async () => {
-    const cookie = await sessionCookie();
-    const res = await app.request(
-      "/api/letters/99",
-      { method: "PATCH", headers: { Cookie: cookie }, body: JSON.stringify({ draftBody: "Revised." }) },
-      fakeEnv({ letters: [existing] }),
-    );
-    expect(res.status).toBe(404);
-  });
-
-  it("updates the letter in place, leaving clientId and createdAt untouched", async () => {
-    const cookie = await sessionCookie();
-    const res = await app.request(
-      "/api/letters/1",
-      {
-        method: "PATCH",
-        headers: { Cookie: cookie },
-        body: JSON.stringify({
-          letterType: "Fee estimate cover letter",
-          format: "email",
-          personalFields: ["CLIENT_NAME", "YOUR_NAME"],
-          draftBody: "Dear {{CLIENT_NAME}}, revised draft.",
-          reviewFlags: [{ severity: "ok", text: "Fine now." }],
-          piiScanClean: true,
-        }),
-      },
-      fakeEnv({ letters: [existing] }),
-    );
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toMatchObject({
-      id: 1,
-      clientId: 1,
-      clientName: "Sarah Whitfield",
-      format: "email",
-      draftBody: "Dear {{CLIENT_NAME}}, revised draft.",
-      piiScanClean: true,
-      createdAt: "2026-09-12T12:00:00.000Z",
-    });
-  });
-});
-
-describe("DELETE /api/letters/:id", () => {
-  it("404s when the letter doesn't exist or is already deleted", async () => {
-    const cookie = await sessionCookie();
-    const res = await app.request("/api/letters/99", { method: "DELETE", headers: { Cookie: cookie } }, fakeEnv());
-    expect(res.status).toBe(404);
-  });
-
-  it("soft-deletes an existing letter", async () => {
-    const cookie = await sessionCookie();
-    const res = await app.request(
-      "/api/letters/1",
-      { method: "DELETE", headers: { Cookie: cookie } },
-      fakeEnv({
-        letters: [
-          {
-            id: 1,
-            client_id: 1,
-            letter_type: null,
-            format: "letter",
-            personal_fields: "[]",
-            draft_body: "Dear {{CLIENT_NAME}},",
-            review_flags: null,
-            pii_scan_clean: null,
-            created_by: 1,
-            created_at: "2026-09-12T12:00:00.000Z",
-            deleted_at: null,
-            deleted_by: null,
-          },
-        ],
-      }),
-    );
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
   });
 });
