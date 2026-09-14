@@ -42,6 +42,14 @@ function parseBoldRuns(line: string): TextRunSpec[] {
   });
 }
 
+// A paragraph that's a single line fully wrapped in `**...**` is a
+// subheading (see letters.ts's drafter prompt) -- both exports give it
+// extra space above so it reads as a genuine section break, not just a
+// bold sentence sitting flush against the paragraph before it.
+function isHeadingParagraph(lines: string[]): boolean {
+  return lines.length === 1 && /^\*\*[^*]+\*\*$/.test((lines[0] ?? "").trim());
+}
+
 export async function generateLetterDocx(body: string): Promise<Blob> {
   const { Document, Packer, Paragraph, TextRun } = await import("docx");
 
@@ -52,7 +60,11 @@ export async function generateLetterDocx(body: string): Promise<Blob> {
           ...(i > 0 ? [new TextRun({ text: "", break: 1 })] : []),
           ...parseBoldRuns(line).map((run) => new TextRun({ text: run.text, bold: run.bold })),
         ]),
-        spacing: { after: 240 },
+        // line: 360 is 1.5 line spacing (240 = single) -- a touch more
+        // breathing room within a paragraph than Word's single-spaced
+        // default. before/after give headings clear separation from the
+        // prose around them without a fixed empty line eating into it.
+        spacing: { after: 240, line: 360, before: isHeadingParagraph(lines) ? 240 : 0 },
       }),
   );
 
@@ -118,14 +130,18 @@ export async function generateLetterPdf(body: string): Promise<Uint8Array> {
   const font = await doc.embedFont(StandardFonts.Helvetica);
   const boldFont = await doc.embedFont(StandardFonts.HelveticaBold);
 
-  const margin = 56;
+  // A full 1in margin (Word's own default, rather than the previous 56pt
+  // ≈ 0.78in) and slightly taller line/paragraph spacing read as a proper
+  // formal letter rather than a dense text dump.
+  const margin = 72;
   const size = 11;
-  const lineHeight = 16;
+  const lineHeight = 17;
   const maxWidth = page.getWidth() - margin * 2;
   const spaceWidth = font.widthOfTextAtSize(" ", size);
   let y = page.getHeight() - margin;
 
   for (const paragraph of toParagraphs(body)) {
+    if (isHeadingParagraph(paragraph)) y -= lineHeight * 0.5;
     for (const rawLine of paragraph) {
       const wrapped = rawLine.trim() === "" ? [[]] : wrapWords(toWords(rawLine), font, boldFont, size, maxWidth);
       for (const line of wrapped) {
@@ -142,7 +158,7 @@ export async function generateLetterPdf(body: string): Promise<Uint8Array> {
         y -= lineHeight;
       }
     }
-    y -= lineHeight * 0.5;
+    y -= lineHeight * 0.75;
   }
 
   return doc.save();
