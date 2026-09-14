@@ -463,6 +463,7 @@ describe("POST /api/letters/:id/analysis", () => {
     const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(sentBody.system).toContain("UK family law");
     expect(sentBody.system).toContain("Never draft the actual letter or email text in this stage");
+    expect(sentBody.system).toContain("Converge quickly");
   });
 
   it("flags a truncated reply and logs usage against the analysis endpoint", async () => {
@@ -563,6 +564,7 @@ describe("POST /api/letters/:id/composition", () => {
     );
     const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(sentBody.system).toContain("Key facts: XYZ.");
+    expect(sentBody.system).toContain("Draft using your best professional judgement");
   });
 
   it("asks for a subject line when format is email", async () => {
@@ -689,6 +691,7 @@ describe("POST /api/letters/:id/review", () => {
     expect(sentBody.system).toContain("supervising solicitor");
     expect(sentBody.system).toContain("Key facts: the estimate is £450.");
     expect(sentBody.system).toContain("Drafting conversation:");
+    expect(sentBody.system).toContain("Only raise a CONCERN for something materially wrong");
   });
 });
 
