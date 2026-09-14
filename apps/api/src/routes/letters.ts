@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { scanForPii, type PiiScanMatch } from "@acm-caseflow/core";
 import type { AppEnv } from "../index";
 import { requireAuth } from "./auth";
-import { AI_MODELS, DEFAULT_MODEL, callClaude, type ChatMessage } from "../anthropic";
+import { AI_MODELS, DEFAULT_MODEL, callClaude, isValidAiModel, type ChatMessage } from "../anthropic";
 
 const letters = new Hono<AppEnv>();
 
@@ -34,6 +34,7 @@ interface LetterRow {
   stage: string;
   analysis_summary: string | null;
   process_summary: string | null;
+  ai_model: string | null;
   created_by_email: string;
   created_at: string;
   updated_at: string;
@@ -88,6 +89,12 @@ interface LetterSession {
   processSummary: string | null;
   reviewFlags: ReviewFlag[] | null;
   piiScanClean: boolean | null;
+  // The model this session's agents use, chosen once at creation (defaults
+  // to the cheapest option -- see POST /) and fixed for the session's
+  // lifetime -- never overwritten by persistLetter. Null only for letters
+  // created before this column existed, which fall back to the account's
+  // configured default model at call time.
+  aiModel: string | null;
   createdByEmail: string;
   createdAt: string;
   updatedAt: string;
@@ -118,6 +125,7 @@ function toLetterSummary(row: LetterRow) {
     processSummary: row.process_summary,
     reviewFlags: row.review_flags ? (JSON.parse(row.review_flags) as ReviewFlag[]) : null,
     piiScanClean: row.pii_scan_clean === null ? null : row.pii_scan_clean === 1,
+    aiModel: row.ai_model,
     createdByEmail: row.created_by_email,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -141,6 +149,7 @@ function rowToSession(row: LetterRow): LetterSession {
     processSummary: row.process_summary,
     reviewFlags: row.review_flags ? (JSON.parse(row.review_flags) as ReviewFlag[]) : null,
     piiScanClean: row.pii_scan_clean === null ? null : row.pii_scan_clean === 1,
+    aiModel: row.ai_model,
     createdByEmail: row.created_by_email,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -150,7 +159,7 @@ function rowToSession(row: LetterRow): LetterSession {
 const SUMMARY_COLUMNS =
   "letters.id, letters.client_id, clients.name AS client_name, letters.letter_type, letters.format, " +
   "letters.personal_fields, letters.draft_body, letters.review_flags, letters.pii_scan_clean, " +
-  "letters.stage, letters.analysis_summary, letters.process_summary, " +
+  "letters.stage, letters.analysis_summary, letters.process_summary, letters.ai_model, " +
   "users.email AS created_by_email, letters.created_at, letters.updated_at";
 
 const DETAIL_COLUMNS = `${SUMMARY_COLUMNS}, letters.analysis_messages, letters.composition_messages, letters.review_rounds`;
@@ -463,6 +472,7 @@ interface CreateSessionRequest {
   letterType?: string;
   format?: string;
   personalFields?: string[];
+  aiModel?: string;
 }
 
 // Creates a session at stage 'analysis' -- no draft, no messages yet. This
@@ -483,6 +493,9 @@ letters.post("/", async (c) => {
   if (body.format !== undefined && !isValidFormat(body.format)) {
     return c.json({ error: `format must be one of: ${LETTER_FORMATS.join(", ")}` }, 400);
   }
+  if (body.aiModel !== undefined && !isValidAiModel(body.aiModel)) {
+    return c.json({ error: `aiModel must be one of: ${AI_MODELS.map((m) => m.id).join(", ")}` }, 400);
+  }
 
   const client = await c.env.DB.prepare("SELECT id FROM clients WHERE id = ?").bind(body.clientId).first();
   if (!client) {
@@ -490,10 +503,14 @@ letters.post("/", async (c) => {
   }
 
   const now = nowIso();
+  // Defaults to the cheapest model (DEFAULT_MODEL) rather than the
+  // account's own configured default -- a deliberate per-letter
+  // cost-conscious default, independent of whatever Admin's AI settings
+  // panel has chosen for everything else.
   const created = await c.env.DB.prepare(
     `INSERT INTO letters (client_id, letter_type, format, personal_fields, draft_body, stage,
-       analysis_messages, composition_messages, review_rounds, created_by, updated_at)
-     VALUES (?, ?, ?, ?, '', 'analysis', '[]', '[]', '[]', ?, ?)
+       analysis_messages, composition_messages, review_rounds, ai_model, created_by, updated_at)
+     VALUES (?, ?, ?, ?, '', 'analysis', '[]', '[]', '[]', ?, ?, ?)
      RETURNING id`,
   )
     .bind(
@@ -501,6 +518,7 @@ letters.post("/", async (c) => {
       letterType,
       isValidFormat(body.format) ? body.format : "letter",
       JSON.stringify(Array.isArray(body.personalFields) ? body.personalFields : []),
+      isValidAiModel(body.aiModel) ? body.aiModel : DEFAULT_MODEL,
       userId,
       now,
     )
@@ -566,7 +584,8 @@ letters.post("/:id/analysis", async (c) => {
     return c.json({ error: "This letter isn't in the analysis stage" }, 400);
   }
 
-  const { model } = await getAccountAiSettings(c.env.DB);
+  const { model: accountModel } = await getAccountAiSettings(c.env.DB);
+  const model = session.aiModel ?? accountModel;
   const nextMessages: ChatMessage[] = [...session.analysisMessages, { role: "user", content: message }];
 
   try {
@@ -608,7 +627,8 @@ letters.post("/:id/analysis/summarize", async (c) => {
     return c.json({ error: "Nothing to summarise yet -- talk to the analyst first" }, 400);
   }
 
-  const { model } = await getAccountAiSettings(c.env.DB);
+  const { model: accountModel } = await getAccountAiSettings(c.env.DB);
+  const model = session.aiModel ?? accountModel;
 
   try {
     const { text, usage, truncated } = await callClaude(c.env.ANTHROPIC_API_KEY, model, summarizeAnalysisPrompt(), [
@@ -650,7 +670,8 @@ letters.post("/:id/composition", async (c) => {
     return c.json({ error: "This letter isn't in the composition stage" }, 400);
   }
 
-  const { model } = await getAccountAiSettings(c.env.DB);
+  const { model: accountModel } = await getAccountAiSettings(c.env.DB);
+  const model = session.aiModel ?? accountModel;
   const nextMessages: ChatMessage[] = [...session.compositionMessages, { role: "user", content: message }];
 
   try {
@@ -720,7 +741,8 @@ letters.post("/:id/review", async (c) => {
     return c.json({ letter: session, truncated: false });
   }
 
-  const { model, complianceGuidelines: guidelines } = await getAccountAiSettings(c.env.DB);
+  const { model: accountModel, complianceGuidelines: guidelines } = await getAccountAiSettings(c.env.DB);
+  const model = session.aiModel ?? accountModel;
 
   try {
     const { text: raw, usage, truncated } = await callClaude(
@@ -805,7 +827,8 @@ letters.post("/:id/review/feedback", async (c) => {
   round.feedbackText = feedbackText || null;
   round.respondedAt = nowIso();
 
-  const { model } = await getAccountAiSettings(c.env.DB);
+  const { model: accountModel } = await getAccountAiSettings(c.env.DB);
+  const model = session.aiModel ?? accountModel;
   const nextMessages: ChatMessage[] = [...session.compositionMessages, { role: "user", content: parts.join("\n\n") }];
 
   try {
@@ -879,7 +902,8 @@ letters.post("/:id/finalize", async (c) => {
 
   let truncated = false;
   if (c.env.ANTHROPIC_API_KEY) {
-    const { model } = await getAccountAiSettings(c.env.DB);
+    const { model: accountModel } = await getAccountAiSettings(c.env.DB);
+    const model = session.aiModel ?? accountModel;
     const journey = [
       `Analyst conversation:\n${session.analysisMessages.length > 0 ? renderConversation(session.analysisMessages, "Analyst") : "(none)"}`,
       `Analysis summary:\n${session.analysisSummary ?? "(none)"}`,

@@ -32,6 +32,7 @@ interface StoredLetter {
   composition_messages: string;
   review_rounds: string;
   process_summary: string | null;
+  ai_model: string | null;
   created_by: number;
   created_at: string;
   updated_at: string;
@@ -83,6 +84,7 @@ function fakeEnv(
       composition_messages: row.composition_messages,
       review_rounds: row.review_rounds,
       process_summary: row.process_summary,
+      ai_model: row.ai_model,
       created_by_email: users.find((u) => u.id === row.created_by)?.email ?? "",
       created_at: row.created_at,
       updated_at: row.updated_at,
@@ -109,8 +111,9 @@ function fakeEnv(
               return (clients.some((c) => c.id === id) ? { id } : null) as T;
             }
             if (sql.includes("INSERT INTO letters")) {
-              const [clientId, letterType, format, personalFields, createdBy, updatedAt] = boundArgs as [
+              const [clientId, letterType, format, personalFields, letterAiModel, createdBy, updatedAt] = boundArgs as [
                 number,
+                string,
                 string,
                 string,
                 string,
@@ -133,6 +136,7 @@ function fakeEnv(
                 composition_messages: "[]",
                 review_rounds: "[]",
                 process_summary: null,
+                ai_model: letterAiModel,
                 created_by: createdBy,
                 created_at: updatedAt,
                 updated_at: updatedAt,
@@ -251,6 +255,7 @@ function baseLetter(overrides: Partial<StoredLetter> = {}): StoredLetter {
     composition_messages: "[]",
     review_rounds: "[]",
     process_summary: null,
+    ai_model: "claude-haiku-4-5",
     created_by: 1,
     created_at: "2026-09-14T12:00:00.000Z",
     updated_at: "2026-09-14T12:00:00.000Z",
@@ -349,6 +354,44 @@ describe("POST /api/letters", () => {
       fakeEnv(),
     );
     expect((await res.json()).format).toBe("letter");
+  });
+
+  it("defaults aiModel to the cheapest option when omitted", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ clientId: 1, letterType: "Fee estimate" }) },
+      fakeEnv(),
+    );
+    expect((await res.json()).aiModel).toBe("claude-haiku-4-5");
+  });
+
+  it("honours an explicit aiModel choice", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters",
+      {
+        method: "POST",
+        headers: { Cookie: cookie },
+        body: JSON.stringify({ clientId: 1, letterType: "Fee estimate", aiModel: "claude-sonnet-5" }),
+      },
+      fakeEnv(),
+    );
+    expect((await res.json()).aiModel).toBe("claude-sonnet-5");
+  });
+
+  it("rejects an invalid aiModel", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters",
+      {
+        method: "POST",
+        headers: { Cookie: cookie },
+        body: JSON.stringify({ clientId: 1, letterType: "Fee estimate", aiModel: "gpt-4" }),
+      },
+      fakeEnv(),
+    );
+    expect(res.status).toBe(400);
   });
 });
 
@@ -480,6 +523,30 @@ describe("POST /api/letters/:id/analysis", () => {
     );
     expect((await res.json()).truncated).toBe(true);
     expect(aiUsage).toEqual([{ endpoint: "analysis", model: "claude-haiku-4-5", input_tokens: 10, output_tokens: 5 }]);
+  });
+
+  it("uses the letter's own chosen model over the account's configured default", async () => {
+    const cookie = await sessionCookie();
+    const fetchMock = vi.fn(async () => claudeResponse("Understood."));
+    vi.stubGlobal("fetch", fetchMock);
+    await app.request(
+      "/api/letters/1/analysis",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ message: "Facts." }) },
+      fakeEnv({ apiKey: API_KEY, aiModel: "claude-haiku-4-5", letters: [baseLetter({ ai_model: "claude-sonnet-5" })] }),
+    );
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).model).toBe("claude-sonnet-5");
+  });
+
+  it("falls back to the account's default model for a letter with no stored aiModel", async () => {
+    const cookie = await sessionCookie();
+    const fetchMock = vi.fn(async () => claudeResponse("Understood."));
+    vi.stubGlobal("fetch", fetchMock);
+    await app.request(
+      "/api/letters/1/analysis",
+      { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ message: "Facts." }) },
+      fakeEnv({ apiKey: API_KEY, aiModel: "claude-sonnet-5", letters: [baseLetter({ ai_model: null })] }),
+    );
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).model).toBe("claude-sonnet-5");
   });
 });
 

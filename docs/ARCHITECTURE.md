@@ -98,6 +98,7 @@ idempotent data imports from the spreadsheet this app replaces.
 | 0028 | `0028_ai_model_and_usage.sql` | Adds `account_settings.ai_model` (defaults to Haiku 4.5); adds `ai_usage` (per-call token counts for Correspondence's agents, keyed by `endpoint`/`model`). |
 | 0029 | `0029_letter_format.sql` | Adds `letters.format` (`letter`/`email`, defaults to `letter`). |
 | 0030 | `0030_letter_stages.sql` | Adds `letters.stage` (defaults `finalized`, since every pre-existing row is an already-completed letter under the old single-conversation flow), `analysis_messages`/`composition_messages`/`review_rounds` (JSON arrays, default `'[]'`), `analysis_summary`/`process_summary` (nullable text), `updated_at` (defaults `''`, backfilled from `created_at` — SQLite's `ALTER TABLE ADD COLUMN` only allows a constant default, not `datetime('now')`, so application code sets it explicitly on every write). Turns Correspondence from a single stateless conversation into the staged, persisted workflow described below. |
+| 0031 | `0031_letter_ai_model.sql` | Adds `letters.ai_model` (nullable). Lets each letter's agents use a model chosen once at creation, independent of the account-wide default. |
 
 ### Current tables (25)
 
@@ -249,9 +250,14 @@ Notable business logic worth knowing about, not obvious from the route list alon
     onto the legacy `review_flags`/`pii_scan_clean` columns at this point, for a
     consistent history-table display alongside pre-migration finalized letters.
 
-  All three agents share one account-wide model choice (`account_settings.ai_model`,
-  Admin's AI settings panel — Haiku 4.5 or Sonnet 5, see `AI_MODELS` in
-  `anthropic.ts`), and every call's token counts are logged to `ai_usage`
+  The model is chosen per letter, not per account: the setup screen's AI model picker
+  (defaulting to the cheapest option, `AI_MODEL_OPTIONS[0]` — currently Haiku 4.5) sets
+  `letters.ai_model` once at creation (`POST /letters`), and every one of that session's
+  agent calls, across all four stages, uses it for the session's lifetime. A letter with
+  no stored `ai_model` (created before this column existed) falls back to
+  `account_settings.ai_model` — Admin's AI settings panel — which remains the account-
+  wide default a fresh letter's picker has no relation to. Either way every call's token
+  counts are logged to `ai_usage`
   (`endpoint`/`model`/`input_tokens`/`output_tokens`, `endpoint` one of `analysis`,
   `analysis-summarize`, `composition`, `review`, `finalize-summary`); `GET
   /letters/usage` aggregates that into a per-model and total estimated-cost figure

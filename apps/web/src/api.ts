@@ -419,9 +419,12 @@ export function updateComplianceGuidelines(complianceGuidelines: string): Promis
 // list here rather than fetched, same as LetterGeneratorPage's personal-
 // field tokens, since it only ever changes when a new Claude generation
 // ships and this app is updated to support it.
+// The first entry is the cheapest -- LetterGeneratorPage's per-letter model
+// picker defaults to it (AI_MODEL_OPTIONS[0]), independent of whatever
+// Admin's AI settings panel has chosen as the account-wide default.
 export const AI_MODEL_OPTIONS = [
-  { id: "claude-haiku-4-5", label: "Haiku 4.5 — fast & economical" },
-  { id: "claude-sonnet-5", label: "Sonnet 5 — higher quality" },
+  { id: "claude-haiku-4-5", label: "Haiku 4.5 (fast & economical)" },
+  { id: "claude-sonnet-5", label: "Sonnet 5 (higher quality)" },
 ];
 
 export function updateAiModel(aiModel: string): Promise<{ aiModel: string }> {
@@ -875,6 +878,10 @@ export interface LetterSummary {
   processSummary: string | null;
   reviewFlags: ReviewFlag[] | null;
   piiScanClean: boolean | null;
+  // Chosen once at creation (see createLetterSession) and fixed for the
+  // session's lifetime -- null only for a letter created before this was
+  // trackable, which falls back to the account's configured default model.
+  aiModel: string | null;
   createdByEmail: string;
   createdAt: string;
   updatedAt: string;
@@ -912,11 +919,13 @@ export function getLetter(id: number): Promise<LetterSession> {
 // Starts a new session at the analysis stage -- no draft yet. personalFields
 // carries only token names (e.g. "CLIENT_NAME"), never real client data;
 // that's fixed for the whole session, never resent as free text on a turn.
+// aiModel defaults server-side to the cheapest option if omitted.
 export function createLetterSession(input: {
   clientId: number;
   letterType: string;
   format: LetterFormat;
   personalFields: string[];
+  aiModel?: string;
 }): Promise<LetterSession> {
   return request("/api/letters", { method: "POST", body: JSON.stringify(input) });
 }
