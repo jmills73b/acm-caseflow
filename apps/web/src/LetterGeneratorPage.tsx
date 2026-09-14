@@ -4,6 +4,7 @@ import { Icon } from "./icons";
 import { extractDocumentText, isSupportedDocument } from "./documentExtract";
 import { downloadBlob, generateLetterDocx, generateLetterPdf } from "./letterExport";
 import {
+  AI_MODEL_OPTIONS,
   createLetterSession,
   deleteLetter,
   finalizeLetter,
@@ -42,6 +43,11 @@ const PERSONAL_FIELD_OPTIONS: Array<{ token: string; label: string }> = [
 ];
 
 const FORMAT_LABELS: Record<LetterFormat, string> = { letter: "Letter", email: "Email" };
+
+// AI_MODEL_OPTIONS[0] is the cheapest option (see api.ts) -- the default for
+// a brand-new session's model picker, regardless of Admin's account-wide
+// AI settings default.
+const CHEAPEST_AI_MODEL = AI_MODEL_OPTIONS[0]?.id ?? "claude-haiku-4-5";
 
 const STAGE_ORDER: LetterStage[] = ["analysis", "composition", "review", "finalized"];
 const STAGE_LABELS: Record<LetterStage, string> = {
@@ -284,6 +290,10 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
   const [letterType, setLetterType] = useState("");
   const [format, setFormat] = useState<LetterFormat>("letter");
   const [personalFields, setPersonalFields] = useState<string[]>(PERSONAL_FIELD_OPTIONS.map((f) => f.token));
+  // Defaults to the cheapest option (AI_MODEL_OPTIONS[0]) regardless of
+  // Admin's account-wide AI settings default -- a deliberate per-letter
+  // cost-conscious default, easy to override for a letter that needs it.
+  const [aiModel, setAiModel] = useState(CHEAPEST_AI_MODEL);
 
   // The active staged session, at whatever stage it's currently in --
   // null means the setup panel below is showing, about to create one.
@@ -386,6 +396,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
     resetSessionState();
     setLetterType("");
     setFormat("letter");
+    setAiModel(CHEAPEST_AI_MODEL);
     setJustFinalized(false);
   }
 
@@ -421,7 +432,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
     setSending(true);
     setError(null);
     try {
-      const created = await createLetterSession({ clientId, letterType: letterType.trim(), format, personalFields });
+      const created = await createLetterSession({ clientId, letterType: letterType.trim(), format, personalFields, aiModel });
       setSession(created);
       await refreshHistory(clientId);
       const result = await sendAnalysisMessage(created.id, `I need to write: ${letterType.trim()}`);
@@ -584,6 +595,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
       setLetterType(full.letterType ?? "");
       setFormat(full.format);
       setPersonalFields(full.personalFields);
+      setAiModel(full.aiModel ?? CHEAPEST_AI_MODEL);
       setSession(full);
       setAnalysisInput("");
       setCompositionInput("");
@@ -672,6 +684,16 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                 <select className="input-compact" value={format} onChange={(event) => setFormat(event.target.value as LetterFormat)}>
                   <option value="letter">Letter</option>
                   <option value="email">Email</option>
+                </select>
+              </label>
+              <label className="edit-field">
+                <span>AI model</span>
+                <select className="input-compact" value={aiModel} onChange={(event) => setAiModel(event.target.value)}>
+                  {AI_MODEL_OPTIONS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
                 </select>
               </label>
             </div>
