@@ -565,6 +565,7 @@ describe("POST /api/letters/:id/composition", () => {
     const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(sentBody.system).toContain("Key facts: XYZ.");
     expect(sentBody.system).toContain("Draft using your best professional judgement");
+    expect(sentBody.system).toContain("`**Subheading**`");
   });
 
   it("asks for a subject line when format is email", async () => {

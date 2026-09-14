@@ -132,17 +132,29 @@ function AutoGrowTextarea({
 // Renders {{TOKEN}} placeholders as visually distinct badges wherever
 // they appear in a message, so a token reads as "not a real value yet"
 // the same way it does in the setup checklist above.
-function renderWithTokens(text: string) {
+function renderTokens(text: string, keyPrefix: string) {
   const parts = text.split(/(\{\{[A-Z0-9_]+\}\})/g);
   return parts.map((part, i) =>
     /^\{\{[A-Z0-9_]+\}\}$/.test(part) ? (
-      <span className="token" key={i}>
+      <span className="token" key={`${keyPrefix}-${i}`}>
         {part}
       </span>
     ) : (
-      <span key={i}>{part}</span>
+      <span key={`${keyPrefix}-${i}`}>{part}</span>
     ),
   );
+}
+
+// A `**Subheading**` line (see letters.ts's drafter prompt -- the only
+// markdown it's allowed to produce) renders bold here the same way it
+// renders bold in the exported docx/PDF (letterExport.ts) -- one shared
+// convention, not markdown support in general.
+function renderWithTokens(text: string) {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g);
+  return parts.map((part, i) => {
+    const bold = /^\*\*([^*]+)\*\*$/.exec(part);
+    return bold ? <strong key={i}>{renderTokens(bold[1] ?? "", `b${i}`)}</strong> : <span key={i}>{renderTokens(part, `p${i}`)}</span>;
+  });
 }
 
 function exportFilename(letterType: string | null, clientName: string, extension: string): string {

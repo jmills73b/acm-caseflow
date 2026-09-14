@@ -216,7 +216,14 @@ Notable business logic worth knowing about, not obvious from the route list alon
     `composition_messages`. The latest reply always becomes `draft_body`, whether it's
     an actual draft or (per the prompt) a clarifying question instead of one, same as
     the previous design. `letters.format` (`letter`/`email`) changes this prompt — an
-    email gets a `Subject:` line and no postal address block, a letter doesn't.
+    email gets a `Subject:` line and no postal address block, a letter doesn't. The one
+    piece of markdown the agent is allowed to produce is `**Subheading**` on its own
+    line, used sparingly to break up a longer letter — everything else (bullet points,
+    `#` headings, italics, horizontal rules) is explicitly off-limits. This is rendered
+    bold rather than left as literal asterisks both in the on-screen chat
+    (`LetterGeneratorPage.tsx`'s `renderWithTokens`) and in the exported docx/PDF
+    (`letterExport.ts`'s `parseBoldRuns`, and the PDF generator's word-level wrapping,
+    which measures each word against the regular or bold font depending which it is).
   - **Review** (`POST /letters/:id/review`) always runs a deterministic regex scan
     (`packages/core`'s `scanForPii`) as a hard gate regardless of whether
     `ANTHROPIC_API_KEY` is configured; the AI-based review layered on top plays

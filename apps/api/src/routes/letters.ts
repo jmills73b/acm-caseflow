@@ -379,9 +379,14 @@ function drafterSystemPrompt(letterType: string, format: LetterFormat, personalF
     format === "email"
       ? "Otherwise, respond with ONLY the full email, incorporating everything discussed so far -- start with a " +
         "single line 'Subject: ...' summarising it, then a blank line, then the email body with a concise " +
-        "greeting and sign-off (no postal address block, no markdown formatting, no preamble like 'Here's a draft')."
+        "greeting and sign-off (no postal address block, no preamble like 'Here's a draft')."
       : "Otherwise, respond with ONLY the full letter body, incorporating everything discussed so far -- no " +
-        "preamble like 'Here's a draft', no commentary, no markdown formatting.",
+        "preamble like 'Here's a draft', no commentary.",
+    "For structure: use `**Subheading**` on its own line to break the body into sections (e.g. **Background**, " +
+      "**Next Steps**, **Fee Estimate**) when, and only when, the letter is long enough or covers enough distinct " +
+      "points that sections genuinely help the reader -- a short, simple letter should stay plain paragraphs with " +
+      "no subheadings at all. That is the ONLY markdown to use: no bullet points, no numbered lists, no `#` " +
+      "headings, no italics, no horizontal rules, and no bold text anywhere except a subheading's own line.",
   ].join("\n\n");
 }
 
