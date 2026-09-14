@@ -326,6 +326,11 @@ function analystSystemPrompt(letterType: string, personalFields: string[]): stri
       "any applicable professional-conduct principles, and flag anything uncertain, missing, or risky. Never draft " +
       "the actual letter or email text in this stage -- that happens in a separate drafting stage once the facts " +
       "and basis are settled here.",
+    "Converge quickly rather than drawing this out: ask only for what you actually need, and ask for everything " +
+      "you need together in a single turn rather than one question at a time across several replies. As soon as " +
+      "you have enough to state the facts, objective, and legal basis with reasonable confidence, say so plainly " +
+      "and stop asking -- for anything non-essential, state a working assumption instead of raising another " +
+      "question about it.",
     "You must use ONLY the following literal placeholder tokens for any personal or identifying information (a " +
       "name, address, or similar) -- never invent, guess, or ask the colleague for a real value:",
     tokensList(personalFields),
@@ -366,8 +371,11 @@ function drafterSystemPrompt(letterType: string, format: LetterFormat, personalF
       "(a name, address, or similar) -- never invent, guess, or fill in a real value of your own, even if it " +
       "would make the letter read more naturally:",
     tokensList(personalFields),
-    "If you need something to draft responsibly that isn't covered by the Analysis Summary or this conversation, " +
-      "ask a single concise clarifying question instead of drafting -- do not include a draft in that reply.",
+    "Draft using your best professional judgement wherever the Analysis Summary and this conversation give you " +
+      "enough to work from -- don't stop to ask about tone, phrasing, structure, or anything you can reasonably " +
+      "infer from the letter's stated purpose. Only fall back to a single concise clarifying question instead of " +
+      "drafting when a specific fact the letter genuinely cannot be written without (a figure, date, or reference " +
+      "with no reasonable default) is missing.",
     format === "email"
       ? "Otherwise, respond with ONLY the full email, incorporating everything discussed so far -- start with a " +
         "single line 'Subject: ...' summarising it, then a blank line, then the email body with a concise " +
@@ -399,6 +407,10 @@ function reviewerSystemPrompt(compositionMessages: ChatMessage[], analysisSummar
       : "(No drafting conversation was provided -- review the letter on its own terms, and treat every factual " +
         "claim in it as unverifiable rather than assuming it's accurate.)",
     "Do not comment on whether the letter contains personal data -- that is checked separately.",
+    "Only raise a CONCERN for something materially wrong -- a genuine factual, legal, or compliance problem, a " +
+      "risk to the firm or client, or an argument meaningfully mis-pitched for the facts. Don't raise stylistic " +
+      "nitpicks or restate a concern the drafting conversation already shows was addressed; if it was fixed, note " +
+      "it as OK instead. The goal is a short list a person can act on quickly, not an exhaustive one.",
     "Respond with exactly one item per line. Each line must start with either 'OK:' (something you checked and " +
       "found no issue with) or 'CONCERN:' (something worth a second look, with your proposed correction). Prefix " +
       "each line's message with a short bracketed category, e.g. '[Factual accuracy]', '[Tone]', '[Omission]', " +
