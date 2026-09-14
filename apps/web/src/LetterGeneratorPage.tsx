@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { scanForPii } from "@acm-caseflow/core";
 import { Icon } from "./icons";
+import { extractDocumentText, isSupportedDocument } from "./documentExtract";
 import { downloadBlob, generateLetterDocx, generateLetterPdf } from "./letterExport";
 import {
   createLetterSession,
@@ -288,6 +290,19 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [justFinalized, setJustFinalized] = useState(false);
 
+  // Analysis-stage document attach: the file itself never leaves the
+  // browser (see documentExtract.ts) -- only the extracted text, reviewed
+  // and possibly edited here, is ever sent to the analyst. documentText
+  // resets documentConfirmed on every edit so a stale confirmation can't
+  // cover content the user hasn't actually reviewed.
+  const [documentFilename, setDocumentFilename] = useState<string | null>(null);
+  const [documentText, setDocumentText] = useState("");
+  const [extracting, setExtracting] = useState(false);
+  const [extractError, setExtractError] = useState<string | null>(null);
+  const [documentConfirmed, setDocumentConfirmed] = useState(false);
+  const documentFileInputRef = useRef<HTMLInputElement>(null);
+  const documentPiiScan = documentText.trim() ? scanForPii(documentText) : null;
+
   const [history, setHistory] = useState<LetterSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
 
@@ -331,6 +346,19 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
     });
   }
 
+  function clearDocument() {
+    setDocumentFilename(null);
+    setDocumentText("");
+    setDocumentConfirmed(false);
+    setExtractError(null);
+    if (documentFileInputRef.current) documentFileInputRef.current.value = "";
+  }
+
+  function updateDocumentText(value: string) {
+    setDocumentText(value);
+    setDocumentConfirmed(false);
+  }
+
   function resetSessionState() {
     setSession(null);
     setAnalysisInput("");
@@ -339,6 +367,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
     setFeedbackText("");
     setLastReplyTruncated(false);
     setError(null);
+    clearDocument();
   }
 
   function handleNewLetter() {
@@ -408,6 +437,47 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
     await runStageAction(() =>
       sendAnalysisMessage(session.id, "Please continue exactly where you left off -- don't repeat or restate anything already written."),
     );
+  }
+
+  async function handleDocumentFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!isSupportedDocument(file)) {
+      setExtractError("Only PDF and Word (.docx) documents can be attached");
+      if (documentFileInputRef.current) documentFileInputRef.current.value = "";
+      return;
+    }
+    setExtractError(null);
+    setDocumentText("");
+    setDocumentConfirmed(false);
+    setExtracting(true);
+    try {
+      const text = await extractDocumentText(file);
+      if (!text.trim()) {
+        setExtractError("Couldn't find any text in that document");
+        setDocumentFilename(null);
+      } else {
+        setDocumentFilename(file.name);
+        setDocumentText(text);
+      }
+    } catch (err) {
+      setExtractError(err instanceof Error ? err.message : "Couldn't extract text from that document");
+      setDocumentFilename(null);
+    } finally {
+      setExtracting(false);
+      if (documentFileInputRef.current) documentFileInputRef.current.value = "";
+    }
+  }
+
+  // Sent as a normal analysis turn -- there's no separate "attachment"
+  // concept server-side (see api.ts's sendAnalysisMessage), just the
+  // reviewed extracted text framed with its source document's name.
+  async function handleSendDocument() {
+    if (!session || !documentText.trim()) return;
+    const content = `Extracted from an uploaded document ("${documentFilename ?? "attached document"}") -- review for ` +
+      `accuracy, it may contain layout artefacts from extraction:\n\n${documentText.trim()}`;
+    const ok = await runStageAction(() => sendAnalysisMessage(session.id, content));
+    if (ok) clearDocument();
   }
 
   // The explicit Analysis -> Composition handoff, followed immediately by
@@ -654,6 +724,66 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                 Talk through the facts, the client's objective, and the relevant UK family-law basis with the legal
                 analyst. Move to drafting once you're both satisfied there's enough to work from.
               </p>
+
+              <div className="edit-panel" style={{ marginBottom: 16 }}>
+                <p className="edit-panel-title">Attach a document (optional)</p>
+                <p className="hint" style={{ marginBottom: 12 }}>
+                  Extract text from a PDF or Word document to add to the conversation — the file itself never
+                  leaves your browser, only the text you review and send below.
+                </p>
+                <input
+                  ref={documentFileInputRef}
+                  type="file"
+                  className="input-compact"
+                  accept=".pdf,.docx"
+                  onChange={handleDocumentFileChange}
+                  disabled={extracting || sending}
+                />
+                {extracting && <p className="loading">Extracting text…</p>}
+                {extractError && (
+                  <p className="error" role="alert">
+                    {extractError}
+                  </p>
+                )}
+                {documentText && (
+                  <>
+                    <label className="edit-field" style={{ marginTop: 12, marginBottom: 12 }}>
+                      <span>Extracted text from "{documentFilename}" — review and edit before sending</span>
+                      <AutoGrowTextarea value={documentText} onChange={updateDocumentText} disabled={sending} maxHeight={320} />
+                    </label>
+                    {documentPiiScan && !documentPiiScan.clean && (
+                      <>
+                        <p className="error" role="alert">
+                          Possible personal data found in this text
+                          {documentPiiScan.matches.length > 0 ? `: ${documentPiiScan.matches.map((m) => m.kind).join(", ")}` : ""}.
+                          Edit it out above, or confirm below that it's safe to send.
+                        </p>
+                        <label className="token-row" style={{ marginBottom: 12 }}>
+                          <input
+                            type="checkbox"
+                            checked={documentConfirmed}
+                            onChange={(event) => setDocumentConfirmed(event.target.checked)}
+                          />
+                          <span className="field-name">I've reviewed this text and it's safe to send</span>
+                        </label>
+                      </>
+                    )}
+                    <div className="row-actions">
+                      <button
+                        type="button"
+                        onClick={handleSendDocument}
+                        disabled={sending || !documentText.trim() || (documentPiiScan !== null && !documentPiiScan.clean && !documentConfirmed)}
+                      >
+                        <Icon name="add" /> {sending ? "Sending…" : "Add to conversation"}
+                      </button>
+                      <button type="button" className="secondary" onClick={clearDocument} disabled={sending}>
+                        Discard
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+
               <div className="edit-panel chat-transcript">
                 {session.analysisMessages.map((message, i) => (
                   <div className={`chat-message chat-message-${message.role}`} key={i}>
