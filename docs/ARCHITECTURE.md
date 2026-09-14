@@ -268,6 +268,21 @@ Notable business logic worth knowing about, not obvious from the route list alon
   click-through — moving forward only ever happens through an explicit stage action
   (Move to drafting, Send to review, Finalise letter).
 
+  The Analysis stage can also attach a document: `apps/web/src/documentExtract.ts`
+  extracts text from a PDF (`pdfjs-dist`) or Word file (`mammoth`), both dynamically
+  imported the same lazy way as `letterExport.ts`'s docx/pdf-lib. This is entirely
+  client-side and additive to the API — the file itself is never uploaded or persisted
+  anywhere, and there's no new backend endpoint; the extracted text is just sent as an
+  ordinary analysis turn (`POST /letters/:id/analysis`) once the user's done with it.
+  Because a real document is the one place in this feature where personal data isn't
+  structurally blocked by the token system (unlike everything the user types, which
+  only ever has token names available), the extracted text is shown in an editable
+  preview and scanned with the same deterministic `scanForPii` the Review stage uses
+  before it's ever sent — if it finds a match, "Add to conversation" is disabled until
+  either the text is edited to remove it or the user explicitly ticks a confirmation
+  checkbox. Editing the text always clears that confirmation, so it can't cover content
+  that's changed since it was given.
+
 ## Frontend
 
 All `.tsx` files live flat in `apps/web/src/` (no subfolders). Roughly three kinds:
