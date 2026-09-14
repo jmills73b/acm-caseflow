@@ -16,9 +16,28 @@ export interface AiModelOption {
   outputPricePerMTok: number;
 }
 
+// Order matters: DEFAULT_MODEL below is AI_MODELS[0], and the frontend's
+// per-letter picker (api.ts's AI_MODEL_OPTIONS, kept in sync with this list)
+// defaults to the same first entry -- cheapest first.
 export const AI_MODELS: AiModelOption[] = [
-  { id: "claude-haiku-4-5", label: "Haiku 4.5 — fast & economical", inputPricePerMTok: 1, outputPricePerMTok: 5 },
-  { id: "claude-sonnet-5", label: "Sonnet 5 — higher quality", inputPricePerMTok: 2, outputPricePerMTok: 10 },
+  {
+    id: "claude-haiku-4-5",
+    label: "Haiku 4.5 — $1/$5 per M tokens — fast & economical, best for routine letters",
+    inputPricePerMTok: 1,
+    outputPricePerMTok: 5,
+  },
+  {
+    id: "claude-sonnet-5",
+    label: "Sonnet 5 — $2/$10 per M tokens — higher quality, good for most correspondence",
+    inputPricePerMTok: 2,
+    outputPricePerMTok: 10,
+  },
+  {
+    id: "claude-opus-5",
+    label: "Opus 5 — $5/$25 per M tokens — highest quality, best for complex or high-stakes letters",
+    inputPricePerMTok: 5,
+    outputPricePerMTok: 25,
+  },
 ];
 
 export const DEFAULT_MODEL = AI_MODELS[0].id;

@@ -380,6 +380,20 @@ describe("POST /api/letters", () => {
     expect((await res.json()).aiModel).toBe("claude-sonnet-5");
   });
 
+  it("accepts Opus 5 as an explicit choice", async () => {
+    const cookie = await sessionCookie();
+    const res = await app.request(
+      "/api/letters",
+      {
+        method: "POST",
+        headers: { Cookie: cookie },
+        body: JSON.stringify({ clientId: 1, letterType: "Fee estimate", aiModel: "claude-opus-5" }),
+      },
+      fakeEnv(),
+    );
+    expect((await res.json()).aiModel).toBe("claude-opus-5");
+  });
+
   it("rejects an invalid aiModel", async () => {
     const cookie = await sessionCookie();
     const res = await app.request(

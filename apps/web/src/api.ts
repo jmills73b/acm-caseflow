@@ -423,8 +423,9 @@ export function updateComplianceGuidelines(complianceGuidelines: string): Promis
 // picker defaults to it (AI_MODEL_OPTIONS[0]), independent of whatever
 // Admin's AI settings panel has chosen as the account-wide default.
 export const AI_MODEL_OPTIONS = [
-  { id: "claude-haiku-4-5", label: "Haiku 4.5 (fast & economical)" },
-  { id: "claude-sonnet-5", label: "Sonnet 5 (higher quality)" },
+  { id: "claude-haiku-4-5", label: "Haiku 4.5 — $1/$5 per M tokens — fast & economical, best for routine letters" },
+  { id: "claude-sonnet-5", label: "Sonnet 5 — $2/$10 per M tokens — higher quality, good for most correspondence" },
+  { id: "claude-opus-5", label: "Opus 5 — $5/$25 per M tokens — highest quality, best for complex or high-stakes letters" },
 ];
 
 export function updateAiModel(aiModel: string): Promise<{ aiModel: string }> {
