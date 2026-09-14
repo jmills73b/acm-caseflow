@@ -2,31 +2,37 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Icon } from "./icons";
 import { downloadBlob, generateLetterDocx, generateLetterPdf } from "./letterExport";
 import {
-  addLetter,
-  chatDraftLetter,
+  createLetterSession,
   deleteLetter,
+  finalizeLetter,
   getClients,
   getDocumentCategories,
+  getLetter,
   getLetters,
-  reviewLetter,
-  updateLetter,
+  goBackToStage,
+  requestLetterReview,
+  sendAnalysisMessage,
+  sendCompositionMessage,
+  sendReviewFeedback,
+  summarizeAnalysis,
   uploadDocument,
-  type ChatMessage,
   type Client,
   type DocumentCategory,
-  type Letter,
   type LetterFormat,
-  type ReviewLetterResult,
+  type LetterSession,
+  type LetterStage,
+  type LetterSummary,
+  type StageResult,
 } from "./api";
 
 // A fixed small set rather than a per-letter-type field schema -- keeps
 // the app from ever needing a form-builder for this. Every one of these
-// only ever reaches the drafting agent as a token name (e.g.
-// "CLIENT_NAME"), never the real value -- see chatDraftLetter's doc
-// comment in api.ts and ARCHITECTURE.md's Correspondence section. This is
-// the one piece of setup that stays structured even though everything
-// else (letter type, facts, tone) now flows through the conversation --
-// it's the safety mechanism, not a fact to discuss.
+// only ever reaches the agents as a token name (e.g. "CLIENT_NAME"),
+// never the real value -- see api.ts's doc comments and ARCHITECTURE.md's
+// Correspondence section. This is the one piece of setup that stays
+// structured even though everything else (letter type, facts, tone) now
+// flows through the staged conversations -- it's the safety mechanism,
+// not a fact to discuss.
 const PERSONAL_FIELD_OPTIONS: Array<{ token: string; label: string }> = [
   { token: "CLIENT_NAME", label: "Client name" },
   { token: "CLIENT_ADDRESS", label: "Postal address" },
@@ -34,6 +40,54 @@ const PERSONAL_FIELD_OPTIONS: Array<{ token: string; label: string }> = [
 ];
 
 const FORMAT_LABELS: Record<LetterFormat, string> = { letter: "Letter", email: "Email" };
+
+const STAGE_ORDER: LetterStage[] = ["analysis", "composition", "review", "finalized"];
+const STAGE_LABELS: Record<LetterStage, string> = {
+  analysis: "1. Analysis",
+  composition: "2. Composition",
+  review: "3. Review",
+  finalized: "4. Finalised",
+};
+
+// Complete = solid ink (finalized). Not yet really underway = dashed,
+// faint (analysis, still establishing the basis). Everything between =
+// plain outline, moving but not finished -- same fill/outline/dashed
+// convention used for invoice and client-case status elsewhere in the app.
+function stageStatusClass(stage: LetterStage): string {
+  if (stage === "finalized") return "status-complete";
+  if (stage === "analysis") return "status-in-progress";
+  return "";
+}
+
+// The stage stepper -- a segmented control (like .mode-toggle elsewhere)
+// rather than independent chips, since a letter is in exactly one stage at
+// a time. An earlier stage is clickable to go back to it (append-only --
+// nothing already written is lost, see api.ts's goBackToStage); the
+// current and any later stage aren't, since forward movement only ever
+// happens through an explicit stage action (Move to drafting, Send to
+// review, etc.), never by jumping ahead in the stepper.
+function StageStepper({ session, onBack }: { session: LetterSession; onBack: (stage: "analysis" | "composition") => void }) {
+  const currentIndex = STAGE_ORDER.indexOf(session.stage);
+  return (
+    <div className="mode-toggle" style={{ marginBottom: 20 }}>
+      {STAGE_ORDER.map((stage, i) => {
+        const isCurrent = stage === session.stage;
+        const canGoBack = session.stage !== "finalized" && i < currentIndex && (stage === "analysis" || stage === "composition");
+        return (
+          <button
+            key={stage}
+            type="button"
+            className={isCurrent ? "active" : ""}
+            disabled={!canGoBack}
+            onClick={canGoBack ? () => onBack(stage as "analysis" | "composition") : undefined}
+          >
+            {STAGE_LABELS[stage]}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 // Grows with typed content instead of staying a cramped fixed height, up
 // to maxHeight -- past that it scrolls within itself rather than pushing
@@ -94,10 +148,9 @@ function exportFilename(letterType: string | null, clientName: string, extension
   return `${base}.${extension}`;
 }
 
-// Shared by the live draft's export row and the "view a saved letter"
-// panel below -- same two questions either way: which file format, and
-// whether a copy also belongs in Documents (case file) or is just a
-// download.
+// Shared by the finalized draft's export row and any other saveable view
+// -- same two questions either way: which file format, and whether a copy
+// also belongs in Documents (case file) or is just a download.
 function ExportControls({
   clientId,
   clientName,
@@ -218,28 +271,25 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
   const [format, setFormat] = useState<LetterFormat>("letter");
   const [personalFields, setPersonalFields] = useState<string[]>(PERSONAL_FIELD_OPTIONS.map((f) => f.token));
 
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [chatInput, setChatInput] = useState("");
+  // The active staged session, at whatever stage it's currently in --
+  // null means the setup panel below is showing, about to create one.
+  // Every stage transition persists server-side as it happens (see
+  // api.ts), so there's no separate "unsaved" state to lose.
+  const [session, setSession] = useState<LetterSession | null>(null);
+  const [analysisInput, setAnalysisInput] = useState("");
+  const [compositionInput, setCompositionInput] = useState("");
   const [sending, setSending] = useState(false);
   // True when the last reply was cut off by hitting the model's token
   // limit rather than finishing naturally -- see anthropic.ts's `truncated`.
   const [lastReplyTruncated, setLastReplyTruncated] = useState(false);
-  // Set once "Continue editing" resumes a saved letter as a live
-  // conversation -- Save then updates that same history row (PATCH)
-  // instead of creating a new one (POST). Cleared by startOver/handleSave.
-  const [editingLetterId, setEditingLetterId] = useState<number | null>(null);
 
-  const [review, setReview] = useState<ReviewLetterResult | null>(null);
-  const [reviewing, setReviewing] = useState(false);
   const [selectedFlags, setSelectedFlags] = useState<Set<number>>(new Set());
   const [feedbackText, setFeedbackText] = useState("");
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
+  const [justFinalized, setJustFinalized] = useState(false);
 
-  const [history, setHistory] = useState<Letter[]>([]);
+  const [history, setHistory] = useState<LetterSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [viewingLetter, setViewingLetter] = useState<Letter | null>(null);
 
   useEffect(() => {
     Promise.all([getClients(), getDocumentCategories()])
@@ -251,20 +301,22 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
       .finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => {
-    setViewingLetter(null);
-    if (clientId === "") {
+  async function refreshHistory(forClientId: number | "") {
+    if (forClientId === "") {
       setHistory([]);
       return;
     }
-    setHistoryLoading(true);
-    getLetters(clientId)
-      .then(setHistory)
-      .catch(() => setHistory([]))
-      .finally(() => setHistoryLoading(false));
-  }, [clientId]);
+    try {
+      setHistory(await getLetters(forClientId));
+    } catch {
+      // Keep whatever's already showing on a transient failure.
+    }
+  }
 
-  const lastAssistantMessage = [...messages].reverse().find((m) => m.role === "assistant") ?? null;
+  useEffect(() => {
+    setHistoryLoading(true);
+    refreshHistory(clientId).finally(() => setHistoryLoading(false));
+  }, [clientId]);
 
   function togglePersonalField(token: string) {
     setPersonalFields((prev) => (prev.includes(token) ? prev.filter((f) => f !== token) : [...prev, token]));
@@ -279,53 +331,40 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
     });
   }
 
-  // Deliberately doesn't reset `saved` -- handleSave calls this right after
-  // a successful save, and the "Saved." confirmation (rendered outside the
-  // in-conversation view below) needs to survive the reset back to the
-  // pre-drafting screen. handleStart clears it instead, once a genuinely
-  // new draft begins.
-  function startOver() {
-    setMessages([]);
-    setChatInput("");
-    setReview(null);
+  function resetSessionState() {
+    setSession(null);
+    setAnalysisInput("");
+    setCompositionInput("");
     setSelectedFlags(new Set());
     setFeedbackText("");
-    setEditingLetterId(null);
     setLastReplyTruncated(false);
     setError(null);
   }
 
-  // Shared by the kickoff message, a normal chat reply, and review
-  // feedback -- all three are "append this as the next user turn and get
-  // the agent's reply", differing only in how the content is composed.
-  async function sendToAgent(content: string): Promise<boolean> {
-    const userMessage: ChatMessage = { role: "user", content };
-    const nextMessages = [...messages, userMessage];
-    setMessages(nextMessages);
+  function handleNewLetter() {
+    resetSessionState();
+    setLetterType("");
+    setFormat("letter");
+    setJustFinalized(false);
+  }
+
+  // Shared by every stage action below: run it, adopt whatever session
+  // state it returns, and surface an error without losing the session.
+  async function runStageAction(action: () => Promise<StageResult>): Promise<boolean> {
+    setSending(true);
     setError(null);
     setLastReplyTruncated(false);
-    setSending(true);
     try {
-      const result = await chatDraftLetter({ letterType: letterType.trim(), format, personalFields, messages: nextMessages });
-      setMessages([...nextMessages, { role: "assistant", content: result.reply }]);
-      setReview(null);
-      setSelectedFlags(new Set());
-      setSaved(false);
+      const result = await action();
+      setSession(result.letter);
       setLastReplyTruncated(result.truncated);
       return true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't reach the drafting agent");
-      setMessages(messages);
+      setError(err instanceof Error ? err.message : "Something went wrong");
       return false;
     } finally {
       setSending(false);
     }
-  }
-
-  // A cut-off reply's own continuation is appended as a further chat turn
-  // -- the agent picks up mid-thought rather than restarting the letter.
-  async function handleContinue() {
-    await sendToAgent("Please continue exactly where you left off -- don't repeat or restate anything already written.");
   }
 
   async function handleStart() {
@@ -337,130 +376,152 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
       setError("Describe the kind of letter you need");
       return;
     }
-    setSaved(false);
-    await sendToAgent(`I need to write: ${letterType.trim()}`);
-  }
-
-  async function handleSend(event: FormEvent) {
-    event.preventDefault();
-    const text = chatInput.trim();
-    if (!text) return;
-    setChatInput("");
-    const ok = await sendToAgent(text);
-    if (!ok) setChatInput(text);
-  }
-
-  async function handleReview() {
-    if (!lastAssistantMessage) return;
+    setJustFinalized(false);
+    setSending(true);
     setError(null);
-    setReviewing(true);
     try {
-      setReview(await reviewLetter(lastAssistantMessage.content, messages));
-      setSelectedFlags(new Set());
+      const created = await createLetterSession({ clientId, letterType: letterType.trim(), format, personalFields });
+      setSession(created);
+      await refreshHistory(clientId);
+      const result = await sendAnalysisMessage(created.id, `I need to write: ${letterType.trim()}`);
+      setSession(result.letter);
+      setLastReplyTruncated(result.truncated);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't review the letter");
+      setError(err instanceof Error ? err.message : "Couldn't start this letter");
     } finally {
-      setReviewing(false);
+      setSending(false);
     }
   }
 
-  // The feedback loop: turn the flags you've picked plus anything you've
-  // typed into one message, send it as the next chat turn, and let the
-  // agent revise -- rather than you having to retype the review's
-  // findings into the chat box yourself.
-  async function handleSendFeedback() {
-    if (!review) return;
-    const flagTexts = review.flags.filter((_, i) => selectedFlags.has(i)).map((f) => f.text);
-    const parts: string[] = [];
-    if (flagTexts.length > 0) {
-      parts.push(`Please address this review feedback:\n${flagTexts.map((t) => `- ${t}`).join("\n")}`);
-    }
-    if (feedbackText.trim()) {
-      parts.push(feedbackText.trim());
-    }
-    if (parts.length === 0) return;
+  async function handleSendAnalysis(event: FormEvent) {
+    event.preventDefault();
+    if (!session) return;
+    const text = analysisInput.trim();
+    if (!text) return;
+    setAnalysisInput("");
+    const ok = await runStageAction(() => sendAnalysisMessage(session.id, text));
+    if (!ok) setAnalysisInput(text);
+  }
 
+  async function handleContinueAnalysis() {
+    if (!session) return;
+    await runStageAction(() =>
+      sendAnalysisMessage(session.id, "Please continue exactly where you left off -- don't repeat or restate anything already written."),
+    );
+  }
+
+  // The explicit Analysis -> Composition handoff, followed immediately by
+  // an auto-kickoff drafting turn -- same "start talking straight away"
+  // feel as handleStart above, just for the drafting agent this time.
+  async function handleSummarize() {
+    if (!session) return;
+    const id = session.id;
+    setSending(true);
+    setError(null);
+    setLastReplyTruncated(false);
+    try {
+      const summarized = await summarizeAnalysis(id);
+      setSession(summarized.letter);
+      const drafted = await sendCompositionMessage(id, "Please draft the letter based on the Analysis Summary above.");
+      setSession(drafted.letter);
+      setLastReplyTruncated(drafted.truncated);
+      await refreshHistory(clientId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't move to drafting");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function handleSendComposition(event: FormEvent) {
+    event.preventDefault();
+    if (!session) return;
+    const text = compositionInput.trim();
+    if (!text) return;
+    setCompositionInput("");
+    const ok = await runStageAction(() => sendCompositionMessage(session.id, text));
+    if (!ok) setCompositionInput(text);
+  }
+
+  async function handleContinueComposition() {
+    if (!session) return;
+    await runStageAction(() =>
+      sendCompositionMessage(session.id, "Please continue exactly where you left off -- don't repeat or restate anything already written."),
+    );
+  }
+
+  async function handleRequestReview() {
+    if (!session) return;
+    setSelectedFlags(new Set());
+    setFeedbackText("");
+    const ok = await runStageAction(() => requestLetterReview(session.id));
+    if (ok) await refreshHistory(clientId);
+  }
+
+  // Turns the flags picked plus anything typed into one response, sent to
+  // the drafting agent -- the review round itself is never applied
+  // automatically, only ever routed back for the user to see revised.
+  async function handleSendReviewFeedback() {
+    if (!session) return;
     const previousFlags = selectedFlags;
     const previousText = feedbackText;
     setSelectedFlags(new Set());
     setFeedbackText("");
-    const ok = await sendToAgent(parts.join("\n\n"));
+    const ok = await runStageAction(() =>
+      sendReviewFeedback(session.id, { selectedFlagIndexes: [...previousFlags], feedbackText: previousText }),
+    );
     if (!ok) {
       setSelectedFlags(previousFlags);
       setFeedbackText(previousText);
+    } else {
+      await refreshHistory(clientId);
     }
   }
 
-  async function handleSave() {
-    if (clientId === "" || !lastAssistantMessage) return;
-    setError(null);
-    setSaving(true);
-    try {
-      const payload = {
-        letterType: letterType.trim(),
-        format,
-        personalFields,
-        draftBody: lastAssistantMessage.content,
-        reviewFlags: review?.flags ?? null,
-        piiScanClean: review?.piiScanClean ?? null,
-      };
-      if (editingLetterId !== null) {
-        await updateLetter(editingLetterId, payload);
-      } else {
-        await addLetter({ clientId, ...payload });
-      }
-      setSaved(true);
-      startOver();
-      setLetterType("");
-      setFormat("letter");
-      setHistory(await getLetters(clientId));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't save the letter");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  // Resumes a saved letter as a live conversation -- there's no stored
-  // chat history (the chat endpoint is stateless, see api.ts), so this
-  // seeds a fresh two-turn conversation ending in the saved draft, which
-  // is enough for the agent to revise from. Saving from here updates the
-  // same row (see handleSave) rather than creating a duplicate.
-  function handleContinueEditing(letter: Letter) {
-    setLetterType(letter.letterType ?? "");
-    setFormat(letter.format);
-    setPersonalFields(letter.personalFields);
-    setMessages([
-      { role: "user", content: `Resuming this previously saved ${FORMAT_LABELS[letter.format].toLowerCase()} for further edits.` },
-      { role: "assistant", content: letter.draftBody },
-    ]);
-    setReview(
-      letter.reviewFlags || letter.piiScanClean !== null
-        ? {
-            piiScanClean: letter.piiScanClean ?? true,
-            piiMatches: [],
-            reviewConfigured: (letter.reviewFlags?.length ?? 0) > 0,
-            flags: letter.reviewFlags ?? [],
-            truncated: false,
-          }
-        : null,
-    );
+  async function handleBack(stage: "analysis" | "composition") {
+    if (!session) return;
     setSelectedFlags(new Set());
     setFeedbackText("");
-    setEditingLetterId(letter.id);
-    setSaved(false);
+    const ok = await runStageAction(() => goBackToStage(session.id, stage));
+    if (ok) await refreshHistory(clientId);
+  }
+
+  async function handleFinalize() {
+    if (!session) return;
+    const ok = await runStageAction(() => finalizeLetter(session.id));
+    if (ok) {
+      setJustFinalized(true);
+      await refreshHistory(clientId);
+    }
+  }
+
+  async function handleOpenHistory(id: number) {
     setError(null);
-    setViewingLetter(null);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    try {
+      const full = await getLetter(id);
+      setLetterType(full.letterType ?? "");
+      setFormat(full.format);
+      setPersonalFields(full.personalFields);
+      setSession(full);
+      setAnalysisInput("");
+      setCompositionInput("");
+      setSelectedFlags(new Set());
+      setFeedbackText("");
+      setLastReplyTruncated(false);
+      setJustFinalized(false);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't open that letter");
+    }
   }
 
   async function handleDeleteHistory(id: number) {
-    const confirmed = window.confirm("Delete this saved letter? It moves to Deleted letters, not removed outright.");
+    const confirmed = window.confirm("Delete this letter? It moves to Deleted letters, not removed outright.");
     if (!confirmed) return;
     try {
       await deleteLetter(id);
       setHistory((prev) => prev.filter((l) => l.id !== id));
-      if (viewingLetter?.id === id) setViewingLetter(null);
+      if (session?.id === id) resetSessionState();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't delete that letter");
     }
@@ -468,8 +529,8 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
 
   if (loading) return <p className="loading">Loading…</p>;
 
-  const inConversation = messages.length > 0;
   const selectedClientName = clients.find((c) => c.id === clientId)?.name ?? "";
+  const currentRound = session && session.reviewRounds.length > 0 ? session.reviewRounds[session.reviewRounds.length - 1] : null;
 
   return (
     <>
@@ -478,10 +539,11 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
       </button>
       <h1>Correspondence</h1>
       <p className="hint">
-        Draft a letter through a conversation with the drafting agent, then send it for review — a supervising-
-        solicitor-style check against what was actually discussed, plus the firm's compliance guidelines and a
-        personal-data scan — before you use it. Personal details are never sent to the AI — the letter always uses
-        placeholders, filled in afterward outside the system.
+        Produce a letter through three stages: analysis with a legal-analyst agent to establish the facts and UK
+        family-law basis, drafting with a legal-composition agent guided by that analysis, and a legal-reviewer
+        agent's check before you finalise it. Personal details are never sent to the AI — every stage uses
+        placeholders, filled in afterward outside the system. Progress saves automatically as you move between
+        stages, so you can leave and come back.
       </p>
 
       {loadError && (
@@ -490,84 +552,81 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
         </p>
       )}
 
-      <p className="settings-section-title">1. Who this is for, and what kind of letter</p>
-      <div className="edit-panel">
-        <div className="edit-row" style={{ marginBottom: 16 }}>
-          <label className="edit-field">
-            <span>Client</span>
-            <select
-              className="input-compact"
-              value={clientId}
-              disabled={inConversation}
-              onChange={(event) => setClientId(event.target.value ? Number(event.target.value) : "")}
-            >
-              <option value="">Choose a client…</option>
-              <optgroup label="Active / prospective">
-                {clients
-                  .filter((c) => c.caseStatus !== "Closed")
-                  .map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-              </optgroup>
-              <optgroup label="Closed">
-                {clients
-                  .filter((c) => c.caseStatus === "Closed")
-                  .map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-              </optgroup>
-            </select>
-          </label>
-          <label className="edit-field">
-            <span>Output</span>
-            <select
-              className="input-compact"
-              value={format}
-              disabled={inConversation}
-              onChange={(event) => setFormat(event.target.value as LetterFormat)}
-            >
-              <option value="letter">Letter</option>
-              <option value="email">Email</option>
-            </select>
-          </label>
-        </div>
-        <label className="edit-field">
-          <span>Letter type</span>
-          <input
-            className="input-compact"
-            value={letterType}
-            disabled={inConversation}
-            onChange={(event) => setLetterType(event.target.value)}
-            placeholder="e.g. Fee estimate cover letter for the ancillary relief matter"
-          />
-        </label>
-      </div>
-
-      <p className="settings-section-title">2. Personal details — always placeholders</p>
-      <div className="edit-panel">
-        <div className="token-checklist">
-          {PERSONAL_FIELD_OPTIONS.map((field) => (
-            <label className="token-row" key={field.token}>
+      {!session && (
+        <>
+          <p className="settings-section-title">1. Who this is for, and what kind of letter</p>
+          <div className="edit-panel">
+            <div className="edit-row" style={{ marginBottom: 16 }}>
+              <label className="edit-field">
+                <span>Client</span>
+                <select
+                  className="input-compact"
+                  value={clientId}
+                  onChange={(event) => setClientId(event.target.value ? Number(event.target.value) : "")}
+                >
+                  <option value="">Choose a client…</option>
+                  <optgroup label="Active / prospective">
+                    {clients
+                      .filter((c) => c.caseStatus !== "Closed")
+                      .map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                  </optgroup>
+                  <optgroup label="Closed">
+                    {clients
+                      .filter((c) => c.caseStatus === "Closed")
+                      .map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                  </optgroup>
+                </select>
+              </label>
+              <label className="edit-field">
+                <span>Output</span>
+                <select className="input-compact" value={format} onChange={(event) => setFormat(event.target.value as LetterFormat)}>
+                  <option value="letter">Letter</option>
+                  <option value="email">Email</option>
+                </select>
+              </label>
+            </div>
+            <label className="edit-field">
+              <span>Letter type</span>
               <input
-                type="checkbox"
-                checked={personalFields.includes(field.token)}
-                onChange={() => togglePersonalField(field.token)}
+                className="input-compact"
+                value={letterType}
+                onChange={(event) => setLetterType(event.target.value)}
+                placeholder="e.g. Fee estimate cover letter for the ancillary relief matter"
               />
-              <span className="field-name">{field.label}</span>
-              <span className="arrow">→</span>
-              <span className="token">{`{{${field.token}}}`}</span>
             </label>
-          ))}
-        </div>
-      </div>
-      <p className="panel-note">
-        The real name and address never leave your database and never reach the AI — only the token does, for the
-        whole conversation below.
-      </p>
+          </div>
+
+          <p className="settings-section-title">2. Personal details — always placeholders</p>
+          <div className="edit-panel">
+            <div className="token-checklist">
+              {PERSONAL_FIELD_OPTIONS.map((field) => (
+                <label className="token-row" key={field.token}>
+                  <input
+                    type="checkbox"
+                    checked={personalFields.includes(field.token)}
+                    onChange={() => togglePersonalField(field.token)}
+                  />
+                  <span className="field-name">{field.label}</span>
+                  <span className="arrow">→</span>
+                  <span className="token">{`{{${field.token}}}`}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+          <p className="panel-note">
+            The real name and address never leave your database and never reach the AI — only the token does, for
+            every stage below.
+          </p>
+        </>
+      )}
 
       {error && (
         <p className="error" role="alert">
@@ -575,103 +634,162 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
         </p>
       )}
 
-      {!inConversation ? (
+      {!session ? (
         <div className="row-actions" style={{ marginBottom: 36 }}>
           <button type="button" onClick={handleStart} disabled={sending}>
-            <Icon name="add" /> {sending ? "Starting…" : "Start drafting"}
+            <Icon name="add" /> {sending ? "Starting…" : "Start"}
           </button>
         </div>
       ) : (
         <>
-          <p className="settings-section-title">3. Draft it together</p>
-          {editingLetterId !== null && (
-            <p className="hint" style={{ marginBottom: 12 }}>
-              Continuing a previously saved letter — saving will update that history entry rather than add a new one.
-            </p>
-          )}
-          <div className="edit-panel chat-transcript">
-            {messages.map((message, i) => (
-              <div className={`chat-message chat-message-${message.role}`} key={i}>
-                <div className="chat-bubble">{renderWithTokens(message.content)}</div>
-              </div>
-            ))}
-            {sending && (
-              <div className="chat-message chat-message-assistant">
-                <div className="chat-bubble chat-bubble-pending">Thinking…</div>
-              </div>
-            )}
-          </div>
+          <StageStepper session={session} onBack={handleBack} />
+          <p className="hint" style={{ marginTop: -8, marginBottom: 20 }}>
+            {FORMAT_LABELS[session.format]} — {session.letterType ?? "Letter"}
+          </p>
 
-          {lastReplyTruncated && !sending && (
+          {session.stage === "analysis" && (
             <>
-              <p className="error" role="alert">
-                That reply looks like it was cut off mid-sentence (hit the model's length limit).
+              <p className="settings-section-title">Analysis — establish the facts and legal basis</p>
+              <p className="hint">
+                Talk through the facts, the client's objective, and the relevant UK family-law basis with the legal
+                analyst. Move to drafting once you're both satisfied there's enough to work from.
               </p>
-              <div className="row-actions" style={{ marginBottom: 12 }}>
-                <button type="button" className="secondary" onClick={handleContinue}>
-                  <Icon name="add" /> Continue
+              <div className="edit-panel chat-transcript">
+                {session.analysisMessages.map((message, i) => (
+                  <div className={`chat-message chat-message-${message.role}`} key={i}>
+                    <div className="chat-bubble">{renderWithTokens(message.content)}</div>
+                  </div>
+                ))}
+                {sending && (
+                  <div className="chat-message chat-message-assistant">
+                    <div className="chat-bubble chat-bubble-pending">Thinking…</div>
+                  </div>
+                )}
+              </div>
+
+              {lastReplyTruncated && !sending && (
+                <>
+                  <p className="error" role="alert">
+                    That reply looks like it was cut off mid-sentence (hit the model's length limit).
+                  </p>
+                  <div className="row-actions" style={{ marginBottom: 12 }}>
+                    <button type="button" className="secondary" onClick={handleContinueAnalysis}>
+                      <Icon name="add" /> Continue
+                    </button>
+                  </div>
+                </>
+              )}
+
+              <form onSubmit={handleSendAnalysis} className="chat-input-row">
+                <AutoGrowTextarea value={analysisInput} onChange={setAnalysisInput} placeholder="Reply to the legal analyst…" disabled={sending} />
+                <button type="submit" disabled={sending || !analysisInput.trim()}>
+                  <Icon name="add" /> Send
+                </button>
+              </form>
+
+              <div className="row-actions" style={{ margin: "16px 0 36px" }}>
+                <button type="button" onClick={handleSummarize} disabled={sending || session.analysisMessages.length === 0}>
+                  <Icon name="tag" /> {sending ? "Working…" : "Move to drafting"}
                 </button>
               </div>
             </>
           )}
 
-          <form onSubmit={handleSend} className="chat-input-row">
-            <AutoGrowTextarea
-              value={chatInput}
-              onChange={setChatInput}
-              placeholder="Reply to the drafting agent…"
-              disabled={sending}
-            />
-            <button type="submit" disabled={sending || !chatInput.trim()}>
-              <Icon name="add" /> Send
-            </button>
-          </form>
-
-          <div className="row-actions" style={{ margin: "16px 0 36px" }}>
-            <button
-              type="button"
-              className="secondary"
-              onClick={handleReview}
-              disabled={!lastAssistantMessage || reviewing}
-            >
-              <Icon name="tag" /> {reviewing ? "Reviewing…" : "Send to review"}
-            </button>
-            <button type="button" className="secondary" onClick={startOver}>
-              Start over
-            </button>
-          </div>
-
-          {review && (
+          {(session.stage === "composition" || session.stage === "review") && (
             <>
-              <p className="settings-section-title">Legal &amp; compliance review</p>
+              <p className="settings-section-title">{session.stage === "review" ? "Composition" : "Composition — draft it together"}</p>
+              {session.analysisSummary && session.stage === "composition" && (
+                <div className="edit-panel" style={{ marginBottom: 16 }}>
+                  <p className="edit-panel-title">Analysis summary</p>
+                  <p style={{ whiteSpace: "pre-wrap" }}>{renderWithTokens(session.analysisSummary)}</p>
+                </div>
+              )}
+              {session.stage === "composition" && (
+                <>
+                  <div className="edit-panel chat-transcript">
+                    {session.compositionMessages.map((message, i) => (
+                      <div className={`chat-message chat-message-${message.role}`} key={i}>
+                        <div className="chat-bubble">{renderWithTokens(message.content)}</div>
+                      </div>
+                    ))}
+                    {sending && (
+                      <div className="chat-message chat-message-assistant">
+                        <div className="chat-bubble chat-bubble-pending">Thinking…</div>
+                      </div>
+                    )}
+                  </div>
+
+                  {lastReplyTruncated && !sending && (
+                    <>
+                      <p className="error" role="alert">
+                        That reply looks like it was cut off mid-sentence (hit the model's length limit).
+                      </p>
+                      <div className="row-actions" style={{ marginBottom: 12 }}>
+                        <button type="button" className="secondary" onClick={handleContinueComposition}>
+                          <Icon name="add" /> Continue
+                        </button>
+                      </div>
+                    </>
+                  )}
+
+                  <form onSubmit={handleSendComposition} className="chat-input-row">
+                    <AutoGrowTextarea
+                      value={compositionInput}
+                      onChange={setCompositionInput}
+                      placeholder="Reply to the drafting agent…"
+                      disabled={sending}
+                    />
+                    <button type="submit" disabled={sending || !compositionInput.trim()}>
+                      <Icon name="add" /> Send
+                    </button>
+                  </form>
+
+                  <div className="row-actions" style={{ margin: "16px 0 36px" }}>
+                    <button type="button" onClick={handleRequestReview} disabled={sending || !session.draftBody.trim()}>
+                      <Icon name="tag" /> {sending ? "Working…" : "Send to review"}
+                    </button>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+
+          {session.stage === "review" && currentRound && (
+            <>
+              <p className="settings-section-title">Review — legal &amp; compliance check</p>
+              <div className="edit-panel chat-transcript">
+                <div className="chat-message chat-message-assistant">
+                  <div className="chat-bubble">{renderWithTokens(session.draftBody)}</div>
+                </div>
+              </div>
               <div className="edit-panel">
-                <div style={{ marginBottom: review.flags.length > 0 ? 14 : 0 }}>
-                  <span className={`status ${review.piiScanClean ? "status-complete" : ""}`}>
-                    Personal-data scan: {review.piiScanClean ? "clear" : "check needed"}
+                <div style={{ marginBottom: currentRound.flags.length > 0 ? 14 : 0 }}>
+                  <span className={`status ${currentRound.piiScanClean ? "status-complete" : ""}`}>
+                    Personal-data scan: {currentRound.piiScanClean ? "clear" : "check needed"}
                   </span>
                 </div>
-                {!review.piiScanClean && (
+                {!currentRound.piiScanClean && (
                   <p className="error" role="alert">
                     Possible personal data found outside the placeholder tokens
-                    {review.piiMatches.length > 0 ? `: ${review.piiMatches.map((m) => m.kind).join(", ")}` : ""}.
-                    Ask the agent to fix it before saving.
+                    {currentRound.piiMatches.length > 0 ? `: ${currentRound.piiMatches.map((m) => m.kind).join(", ")}` : ""}. Go
+                    back to drafting and ask the agent to fix it before finalising.
                   </p>
                 )}
-                {!review.reviewConfigured && (
+                {!currentRound.reviewConfigured && (
                   <p className="hint">
                     Advisory legal review isn't configured yet (needs an Anthropic API key) — the personal-data
                     scan above still ran.
                   </p>
                 )}
-                {review.truncated && (
+                {currentRound.truncated && (
                   <p className="error" role="alert">
                     This review looks like it was cut off mid-sentence (hit the model's length limit) — try Send to
                     review again.
                   </p>
                 )}
-                {review.flags.length > 0 && (
+                {currentRound.flags.length > 0 && (
                   <ul className="review-list">
-                    {review.flags.map((flag, i) => (
+                    {currentRound.flags.map((flag, i) => (
                       <li className="review-item" key={i}>
                         <label className="token-row" style={{ gap: 8 }}>
                           <input type="checkbox" checked={selectedFlags.has(i)} onChange={() => toggleSelectedFlag(i)} />
@@ -682,7 +800,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                     ))}
                   </ul>
                 )}
-                <label className="edit-field" style={{ marginTop: review.flags.length > 0 ? 16 : 4, marginBottom: 12 }}>
+                <label className="edit-field" style={{ marginTop: currentRound.flags.length > 0 ? 16 : 4, marginBottom: 12 }}>
                   <span>Feedback for the drafting agent (optional)</span>
                   <AutoGrowTextarea
                     value={feedbackText}
@@ -694,7 +812,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                 <div className="row-actions">
                   <button
                     type="button"
-                    onClick={handleSendFeedback}
+                    onClick={handleSendReviewFeedback}
                     disabled={sending || (selectedFlags.size === 0 && !feedbackText.trim())}
                   >
                     <Icon name="add" /> {sending ? "Sending…" : "Send feedback to agent"}
@@ -702,27 +820,59 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                 </div>
               </div>
               <p className="panel-note">Advisory, not a gate — you decide what to act on.</p>
+
+              <div className="row-actions" style={{ margin: "16px 0 36px" }}>
+                <button type="button" onClick={handleFinalize} disabled={sending}>
+                  <Icon name="save" /> {sending ? "Finalising…" : "Finalise letter"}
+                </button>
+              </div>
+            </>
+          )}
+
+          {session.stage === "finalized" && (
+            <>
+              <p className="settings-section-title">Finalised</p>
+              <div className="edit-panel chat-transcript">
+                <div className="chat-message chat-message-assistant">
+                  <div className="chat-bubble">{renderWithTokens(session.draftBody)}</div>
+                </div>
+              </div>
+              {session.reviewFlags && session.reviewFlags.length > 0 && (
+                <ul className="review-list" style={{ marginBottom: 16 }}>
+                  {session.reviewFlags.map((flag, i) => (
+                    <li className="review-item" key={i}>
+                      <span className={`review-dot ${flag.severity === "concern" ? "warn" : ""}`} />
+                      <span>{flag.text}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {session.processSummary && (
+                <>
+                  <p className="settings-section-title">AI process summary</p>
+                  <div className="edit-panel" style={{ marginBottom: 20 }}>
+                    <p style={{ whiteSpace: "pre-wrap" }}>{session.processSummary}</p>
+                  </div>
+                </>
+              )}
+              <ExportControls
+                clientId={session.clientId}
+                clientName={session.clientName}
+                letterType={session.letterType}
+                body={session.draftBody}
+                categories={documentCategories}
+              />
             </>
           )}
 
           <div className="row-actions" style={{ marginBottom: 24 }}>
-            <button type="button" onClick={handleSave} disabled={!lastAssistantMessage || saving}>
-              <Icon name="save" /> {saving ? "Saving…" : editingLetterId !== null ? "Save changes" : "Save to history"}
+            <button type="button" className="secondary" onClick={handleNewLetter}>
+              New letter
             </button>
           </div>
-
-          {lastAssistantMessage && clientId !== "" && (
-            <ExportControls
-              clientId={clientId}
-              clientName={selectedClientName}
-              letterType={letterType.trim() || null}
-              body={lastAssistantMessage.content}
-              categories={documentCategories}
-            />
-          )}
         </>
       )}
-      {saved && <p className="hint">Saved.</p>}
+      {justFinalized && <p className="hint">Finalised.</p>}
 
       {clientId !== "" && (
         <>
@@ -730,7 +880,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
           {historyLoading ? (
             <p className="loading">Loading…</p>
           ) : history.length === 0 ? (
-            <p className="empty">No letters saved for this client yet.</p>
+            <p className="empty">No letters started for this client yet.</p>
           ) : (
             <div className="table-scroll">
               <table className="ledger">
@@ -739,6 +889,7 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                     <th>Date</th>
                     <th>Type</th>
                     <th>Format</th>
+                    <th>Stage</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
@@ -749,13 +900,12 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                       <td>{letter.letterType ?? "—"}</td>
                       <td>{FORMAT_LABELS[letter.format] ?? letter.format}</td>
                       <td>
+                        <span className={`status ${stageStatusClass(letter.stage)}`}>{STAGE_LABELS[letter.stage]}</span>
+                      </td>
+                      <td>
                         <div className="row-actions">
-                          <button
-                            type="button"
-                            className="secondary"
-                            onClick={() => setViewingLetter(viewingLetter?.id === letter.id ? null : letter)}
-                          >
-                            <Icon name="mail" /> {viewingLetter?.id === letter.id ? "Hide" : "View"}
+                          <button type="button" className="secondary" onClick={() => handleOpenHistory(letter.id)}>
+                            <Icon name="mail" /> Open
                           </button>
                           <button type="button" className="danger" onClick={() => handleDeleteHistory(letter.id)}>
                             <Icon name="delete" /> Delete
@@ -767,41 +917,6 @@ export function LetterGeneratorPage({ onBack }: { onBack: () => void }) {
                 </tbody>
               </table>
             </div>
-          )}
-
-          {viewingLetter && (
-            <>
-              <p className="settings-section-title">
-                {viewingLetter.letterType ?? "Letter"} — {new Date(viewingLetter.createdAt).toLocaleDateString("en-GB")}
-              </p>
-              <div className="edit-panel chat-transcript">
-                <div className="chat-message chat-message-assistant">
-                  <div className="chat-bubble">{renderWithTokens(viewingLetter.draftBody)}</div>
-                </div>
-              </div>
-              {viewingLetter.reviewFlags && viewingLetter.reviewFlags.length > 0 && (
-                <ul className="review-list" style={{ marginBottom: 16 }}>
-                  {viewingLetter.reviewFlags.map((flag, i) => (
-                    <li className="review-item" key={i}>
-                      <span className={`review-dot ${flag.severity === "concern" ? "warn" : ""}`} />
-                      <span>{flag.text}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <div className="row-actions" style={{ marginBottom: 16 }}>
-                <button type="button" onClick={() => handleContinueEditing(viewingLetter)}>
-                  <Icon name="tag" /> Continue editing
-                </button>
-              </div>
-              <ExportControls
-                clientId={viewingLetter.clientId}
-                clientName={viewingLetter.clientName}
-                letterType={viewingLetter.letterType}
-                body={viewingLetter.draftBody}
-                categories={documentCategories}
-              />
-            </>
           )}
         </>
       )}

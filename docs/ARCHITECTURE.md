@@ -97,6 +97,7 @@ idempotent data imports from the spreadsheet this app replaces.
 | 0027 | `0027_correspondence_chat_redesign.sql` | Drops `letter_categories` and `letters`' `letter_category_id`/`amount`/`reference`/`key_date`/`tone`/`bespoke_request` columns; adds `letters.letter_type` (free text). Letter type and every fact/tone detail moved into the drafting conversation itself — no production data depended on the dropped columns yet. |
 | 0028 | `0028_ai_model_and_usage.sql` | Adds `account_settings.ai_model` (defaults to Haiku 4.5); adds `ai_usage` (per-call token counts for Correspondence's agents, keyed by `endpoint`/`model`). |
 | 0029 | `0029_letter_format.sql` | Adds `letters.format` (`letter`/`email`, defaults to `letter`). |
+| 0030 | `0030_letter_stages.sql` | Adds `letters.stage` (defaults `finalized`, since every pre-existing row is an already-completed letter under the old single-conversation flow), `analysis_messages`/`composition_messages`/`review_rounds` (JSON arrays, default `'[]'`), `analysis_summary`/`process_summary` (nullable text), `updated_at` (defaults `''`, backfilled from `created_at` — SQLite's `ALTER TABLE ADD COLUMN` only allows a constant default, not `datetime('now')`, so application code sets it explicitly on every write). Turns Correspondence from a single stateless conversation into the staged, persisted workflow described below. |
 
 ### Current tables (25)
 
@@ -134,7 +135,7 @@ system, just signed-in-or-not (see [Auth model](#auth-model)).
 | `/api/invoice-batches` | `invoiceBatches.ts` | `GET /`, `GET /:id`, `POST /`, `DELETE /:id` |
 | `/api/invoice-settings` | `invoiceSettings.ts` | `GET /`, `PUT /` |
 | `/api/invoices` | `invoices.ts` | `GET /`, `POST /`, `PATCH /:id`, `DELETE /:id` |
-| `/api/letters` | `letters.ts` | `GET /`, `GET /deleted`, `GET /usage`, `POST /chat`, `POST /review`, `POST /`, `PATCH /:id`, `DELETE /:id` |
+| `/api/letters` | `letters.ts` | `GET /`, `GET /deleted`, `GET /usage`, `POST /` (create session), `GET /:id`, `POST /:id/analysis`, `POST /:id/analysis/summarize`, `POST /:id/composition`, `POST /:id/review`, `POST /:id/review/feedback`, `POST /:id/back`, `POST /:id/finalize`, `DELETE /:id` |
 | `/api/note-categories` | `noteCategories.ts` | `GET /`, `POST /`, `PATCH /:id`, `DELETE /:id` |
 | `/api/tasks` | `tasks.ts` | `GET /`, `GET /:id`, `POST /`, `PATCH /:id`, `POST /:id/actions` |
 | `/api/tax-year-settings` | `taxYearSettings.ts` | `GET /:startYear`, `POST /:startYear`, `POST /:startYear/split`, `PUT /:startYear/rates` |
@@ -170,66 +171,102 @@ Notable business logic worth knowing about, not obvious from the route list alon
   its billed total into the same figure as the first, unless the estimate is manually
   reset. A dedicated `matters` table would fix this but wasn't built; the client-level
   version was chosen as the smaller, well-precedented change.
-- **Correspondence** (`letters.ts`) drafts a letter through an open-ended conversation
-  with the drafting agent (`POST /letters/chat`) rather than a single-shot generate:
-  the letter type is free text, and every fact/tone detail is discussed in the
-  conversation itself. The chat endpoint is stateless — the frontend
-  (`LetterGeneratorPage.tsx`) holds the full message history and resends it on every
-  turn; nothing about the conversation is persisted server-side, only the final
-  accepted draft. The one thing that *isn't* conversational is personal data: guided
-  fields for anything identifying (name, address) are converted to placeholder tokens
-  (e.g. `{{CLIENT_NAME}}`) before the conversation starts, and that token list is baked
-  into the system prompt fresh on every call — so the drafting agent's prompt only
-  ever contains token names, not values, for the whole conversation, not just the
-  first turn. There's no redaction step to get wrong, because the model is never given
-  anything to redact. Before drafting, the agent's system prompt has it work through an
-  internal analysis (facts established so far, what the client wants, legal issues,
-  applicable law/principles, a recommended position, anything uncertain) that never
-  appears in its reply — it only shapes how it drafts, and a gap found there is what
-  drives the existing "ask a clarifying question instead of drafting" behaviour.
-  `POST /letters/review` always runs a deterministic regex scan (`packages/core`'s
-  `scanForPii`) as a hard gate regardless of whether `ANTHROPIC_API_KEY` is configured;
-  the AI-based review layered on top of that plays supervising solicitor — checking the
-  draft against the drafting conversation (its only record of what was actually
-  discussed) for factual/legal accuracy, invented content, over/under-stated arguments,
-  tone, omissions, and anything the recipient could exploit, as well as the firm's own
-  compliance guidelines — and is advisory only (its flags are never a pass/fail gate).
-  The conversation is optional in the request (a review with none falls back to judging
-  the letter on its own terms) but the live UI always sends it. Guidelines are read from
-  `account_settings.compliance_guidelines` — free text the account holder maintains
-  themselves, since only they know which regulatory framework actually applies to their
-  practice. Both agents share one account-wide model choice
-  (`account_settings.ai_model`, Admin's AI settings panel — Haiku 4.5 or Sonnet 5, see
-  `AI_MODELS` in `anthropic.ts`), and every call's token counts are logged to
-  `ai_usage` (`endpoint`/`model`/`input_tokens`/`output_tokens`); `GET /letters/usage`
-  aggregates that into a per-model and total estimated-cost figure (from Anthropic's
-  published per-token pricing, computed by this app — not a live account balance) for
-  the Usage admin tab. `letters.format` (`letter` or `email`) is chosen alongside letter
-  type before drafting starts and changes the drafting agent's system prompt — an email
-  gets a `Subject:` line and no postal address block, a letter doesn't. A saved letter
-  can be reopened from Correspondence history (`GET /letters` already returns
-  `draftBody`, nothing extra to fetch) and, from either the live draft or a reopened
-  one, exported: `apps/web/src/letterExport.ts` generates a Word (`docx` package) or
-  PDF (`pdf-lib`, lazy-imported like `invoicePdf.ts`) file client-side from the draft
-  text verbatim (tokens included), which either just downloads or — if "Also save this
-  file to Documents" is ticked — also uploads through the existing Documents feature
+- **Correspondence** (`letters.ts`) produces a letter through a staged, persisted,
+  three-agent pipeline rather than a single open-ended chat: **Analysis** (a UK
+  family-law legal-analyst agent establishes the facts and legal basis with the user)
+  -> **Composition** (a UK family-law legal-drafting agent drafts strictly within that
+  analysis, revised over as many turns as needed) -> **Review** (a UK family-law
+  legal-reviewer agent checks the draft, looping back to Composition as many times as
+  needed) -> **Finalized**. A `letters` row represents this whole lifecycle from the
+  moment it's created (`POST /letters`, stage `analysis`, empty draft), not just the
+  finished result, and **auto-saves at every stage transition** — every staged endpoint
+  loads the row, mutates it, and persists the whole thing back in one write
+  (`persistLetter` in `letters.ts`), so a session survives a closed tab and resumes
+  exactly where it left off (`GET /letters/:id`). `analysis_messages`,
+  `composition_messages`, and `review_rounds` are **append-only**: going back to an
+  earlier stage (`POST /letters/:id/back`, restricted to `analysis`/`composition` — not
+  `review`, which is only ever entered via the review agent, and not once `finalized`)
+  only moves the stage pointer, never deletes anything, so nothing is lost and every
+  round of review feeds the finalize-time summary below. `GET /letters` (the history
+  list) deliberately excludes these three JSON columns — it's a lightweight work list
+  showing `stage` and other summary fields, not every session's full conversation;
+  `GET /letters/:id` is the full-detail fetch used to resume or reopen one.
+
+  As before, personal data is never conversational: guided fields for anything
+  identifying (name, address) are converted to placeholder tokens (e.g.
+  `{{CLIENT_NAME}}`) once at creation, and that token list is baked into every stage's
+  system prompt fresh on every call — so no agent's prompt, across any stage, ever
+  contains a real value, only token names. There's no redaction step to get wrong,
+  because no model is ever given anything to redact.
+
+  Each stage is its own agent persona with its own system prompt (`letters.ts`):
+  - **Analysis** (`POST /letters/:id/analysis`) only gathers facts, the client's
+    objective, and the relevant UK family-law and costs-law basis — its system prompt
+    explicitly forbids drafting letter text in this stage. It's a stateful chat turn:
+    the client sends only the new message, and the server appends both it and the
+    reply to `analysis_messages` before persisting (a deliberate reversal of the old
+    stateless "resend everything" design, needed for auto-save/resume to work).
+  - **`POST /letters/:id/analysis/summarize`** is the explicit Stage 1 -> 2 handoff: a
+    one-shot call condenses the analyst conversation into a structured Analysis
+    Summary (Key facts / Client objective / Legal basis / Recommended approach / Open
+    questions) under `analysis_summary`, and transitions the session to `composition`.
+    The drafting agent never sees the raw analyst conversation, only this summary.
+  - **Composition** (`POST /letters/:id/composition`) drafts strictly within the
+    Analysis Summary — the same stateful append-and-persist pattern, appending to
+    `composition_messages`. The latest reply always becomes `draft_body`, whether it's
+    an actual draft or (per the prompt) a clarifying question instead of one, same as
+    the previous design. `letters.format` (`letter`/`email`) changes this prompt — an
+    email gets a `Subject:` line and no postal address block, a letter doesn't.
+  - **Review** (`POST /letters/:id/review`) always runs a deterministic regex scan
+    (`packages/core`'s `scanForPii`) as a hard gate regardless of whether
+    `ANTHROPIC_API_KEY` is configured; the AI-based review layered on top plays
+    supervising solicitor — checking the draft against the Analysis Summary and the
+    drafting conversation for factual/legal accuracy under UK family law, invented
+    content, over/under-stated arguments, tone, omissions, and anything the recipient
+    could exploit, plus the firm's own compliance guidelines
+    (`account_settings.compliance_guidelines`, free text the account holder maintains)
+    — and is advisory only (flags are never a pass/fail gate). Each call **appends** a
+    new round to `review_rounds` (never replaces the last one) and moves the session to
+    `review`, so re-reviewing after more drafting keeps the full history.
+    `POST /letters/:id/review/feedback` records which flags the user picked (and any
+    free text) against the latest round, forwards it as the next Composition turn, and
+    routes the session back to `composition` — the reviewer's findings are never
+    applied automatically.
+  - **`POST /letters/:id/finalize`** generates an AI-written narrative process summary
+    (`process_summary`, 2-4 plain-prose paragraphs covering what analysis established,
+    how the draft evolved, what review raised, and how it was addressed — a deliberate
+    choice of narrative over a structured log) from the whole session's history, then
+    locks the session as `finalized`. Like Review, this is best-effort: with no
+    `ANTHROPIC_API_KEY` configured, finalizing still succeeds with no process summary
+    rather than blocking. The latest review round's flags/PII-clean result are mirrored
+    onto the legacy `review_flags`/`pii_scan_clean` columns at this point, for a
+    consistent history-table display alongside pre-migration finalized letters.
+
+  All three agents share one account-wide model choice (`account_settings.ai_model`,
+  Admin's AI settings panel — Haiku 4.5 or Sonnet 5, see `AI_MODELS` in
+  `anthropic.ts`), and every call's token counts are logged to `ai_usage`
+  (`endpoint`/`model`/`input_tokens`/`output_tokens`, `endpoint` one of `analysis`,
+  `analysis-summarize`, `composition`, `review`, `finalize-summary`); `GET
+  /letters/usage` aggregates that into a per-model and total estimated-cost figure
+  (from Anthropic's published per-token pricing, computed by this app — not a live
+  account balance) for the Usage admin tab. Every `callClaude` call (`anthropic.ts`)
+  requests a 4096-token budget and reports whether the reply hit it (`stop_reason ===
+  "max_tokens"`) as `truncated` on every staged endpoint's response — the frontend
+  shows a clear notice with a "Continue" button that asks the relevant agent to pick
+  back up rather than restart.
+
+  A finalized letter is exported from `LetterGeneratorPage.tsx`'s Finalized panel:
+  `apps/web/src/letterExport.ts` generates a Word (`docx` package) or PDF (`pdf-lib`,
+  lazy-imported like `invoicePdf.ts`) file client-side from `draft_body` verbatim
+  (tokens included), which either just downloads or — if "Also save this file to
+  Documents" is ticked — also uploads through the existing Documents feature
   (`uploadDocument`, direction `outbound`), landing in R2 encrypted like any other
   document. Nothing about the export path touches the AI or sends the letter anywhere
-  new; it's the same accepted draft, repackaged. A reopened letter can also go back
-  into drafting ("Continue editing"): since the chat endpoint is stateless and no
-  conversation history is stored, this seeds a fresh two-turn conversation (a synthetic
-  "resuming this letter" opener plus the saved draft as the reply) for the agent to
-  revise from, and carries the letter's id so Save updates that row (`PATCH
-  /letters/:id`) instead of creating a duplicate. The review panel doubles as a
-  feedback loop: each OK/CONCERN flag has a checkbox, there's a free-text box for
-  anything else, and "Send feedback to agent" combines whatever's checked plus the
-  free text into the next chat turn — same as typing it into the chat box yourself,
-  just without re-transcribing the flags. Every `callClaude` call (`anthropic.ts`)
-  requests a 4096-token budget and reports whether the reply hit it (`stop_reason ===
-  "max_tokens"`) as `truncated` on both `/chat` and `/review`'s response — a cut-off
-  reply used to be returned silently (a real bug, at the old 1024-token cap a full
-  letter could easily run past); the UI now shows a clear notice with a "Continue"
-  button that asks the agent to pick back up rather than restart.
+  new; it's the same finalized draft, repackaged. The frontend's stage stepper (a
+  `.mode-toggle` segmented control) reflects `stage` and lets the user click back to
+  `analysis`/`composition` (calling `POST /letters/:id/back`); it has no forward
+  click-through — moving forward only ever happens through an explicit stage action
+  (Move to drafting, Send to review, Finalise letter).
 
 ## Frontend
 

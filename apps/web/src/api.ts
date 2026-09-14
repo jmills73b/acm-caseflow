@@ -829,21 +829,58 @@ export interface PiiScanMatch {
 
 export type LetterFormat = "letter" | "email";
 
-export interface Letter {
+// A "letter" is a whole staged lifecycle record -- Analysis (facts and UK
+// family-law basis with a legal-analyst agent) -> Composition (drafting,
+// guided by the Analysis Summary) -> Review (a legal-reviewer agent checks
+// the draft, looping back to Composition as needed) -> Finalized -- not
+// just the finished result. See ARCHITECTURE.md's Correspondence section.
+export type LetterStage = "analysis" | "composition" | "review" | "finalized";
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+// One "Send to review": appended to reviewRounds, never replaced, so the
+// full history survives a back-navigation to Composition and feeds the
+// finalize-time narrative. selectedFlagTexts/feedbackText/respondedAt stay
+// null until sendReviewFeedback is called for this round.
+export interface ReviewRound {
+  createdAt: string;
+  draftSnapshot: string;
+  piiScanClean: boolean;
+  piiMatches: PiiScanMatch[];
+  reviewConfigured: boolean;
+  truncated: boolean;
+  flags: ReviewFlag[];
+  selectedFlagTexts: string[] | null;
+  feedbackText: string | null;
+  respondedAt: string | null;
+}
+
+// What GET /api/letters (the history list) returns -- deliberately
+// excludes the message histories and review rounds, which only the
+// full-detail getLetter() below includes, so a client's whole history
+// doesn't ship every conversation on every page load.
+export interface LetterSummary {
   id: number;
   clientId: number;
   clientName: string;
   letterType: string | null;
   format: LetterFormat;
   personalFields: string[];
+  stage: LetterStage;
   draftBody: string;
+  analysisSummary: string | null;
+  processSummary: string | null;
   reviewFlags: ReviewFlag[] | null;
   piiScanClean: boolean | null;
   createdByEmail: string;
   createdAt: string;
+  updatedAt: string;
 }
 
-export interface DeletedLetter extends Letter {
+export interface DeletedLetterSummary extends LetterSummary {
   deletedAt: string;
   deletedByEmail: string | null;
 }
@@ -851,70 +888,92 @@ export interface DeletedLetter extends Letter {
 // clientId scopes the history to one client, which is how
 // LetterGeneratorPage.tsx always calls this -- omitting it is kept for
 // parity with getDocuments' all-clients mode, not currently used.
-export function getLetters(clientId?: number): Promise<Letter[]> {
+export function getLetters(clientId?: number): Promise<LetterSummary[]> {
   return request(clientId !== undefined ? `/api/letters?clientId=${clientId}` : "/api/letters");
 }
 
-export function getDeletedLetters(): Promise<DeletedLetter[]> {
+export function getDeletedLetters(): Promise<DeletedLetterSummary[]> {
   return request("/api/letters/deleted");
 }
 
-export interface ChatMessage {
-  role: "user" | "assistant";
-  content: string;
+// The full staged session, including every message history and review
+// round -- what creating a session, resuming one, and every stage-
+// transition call below returns.
+export interface LetterSession extends LetterSummary {
+  analysisMessages: ChatMessage[];
+  compositionMessages: ChatMessage[];
+  reviewRounds: ReviewRound[];
 }
 
-// Stateless -- the conversation lives in this component's own state, and
-// the whole history is resent on every turn. Nothing about a letter's
-// drafting conversation is persisted server-side, only the final accepted
-// draft (addLetter below). See ARCHITECTURE.md's Correspondence section
-// for why personalFields carries only token names, never real client
-// data -- that's what's fixed for the whole conversation, not re-sent as
-// free text on each turn.
-export function chatDraftLetter(input: {
+export function getLetter(id: number): Promise<LetterSession> {
+  return request(`/api/letters/${id}`);
+}
+
+// Starts a new session at the analysis stage -- no draft yet. personalFields
+// carries only token names (e.g. "CLIENT_NAME"), never real client data;
+// that's fixed for the whole session, never resent as free text on a turn.
+export function createLetterSession(input: {
+  clientId: number;
   letterType: string;
   format: LetterFormat;
   personalFields: string[];
-  messages: ChatMessage[];
-}): Promise<{ reply: string; truncated: boolean }> {
-  return request("/api/letters/chat", { method: "POST", body: JSON.stringify(input) });
-}
-
-export interface ReviewLetterResult {
-  piiScanClean: boolean;
-  piiMatches: PiiScanMatch[];
-  reviewConfigured: boolean;
-  flags: ReviewFlag[];
-  truncated: boolean;
-}
-
-// Passing the conversation lets the review agent check the draft against
-// what was actually discussed (factual/legal accuracy, invented content)
-// rather than reviewing the letter in isolation with nothing to check it
-// against -- see letters.ts's /review handler.
-export function reviewLetter(draftBody: string, messages: ChatMessage[]): Promise<ReviewLetterResult> {
-  return request("/api/letters/review", { method: "POST", body: JSON.stringify({ draftBody, messages }) });
-}
-
-export interface SaveLetterInput {
-  clientId: number;
-  letterType?: string | null;
-  format: LetterFormat;
-  personalFields: string[];
-  draftBody: string;
-  reviewFlags?: ReviewFlag[] | null;
-  piiScanClean?: boolean | null;
-}
-
-export function addLetter(input: SaveLetterInput): Promise<Letter> {
+}): Promise<LetterSession> {
   return request("/api/letters", { method: "POST", body: JSON.stringify(input) });
 }
 
-// Used by "Continue editing" a saved letter (LetterGeneratorPage.tsx) --
-// updates the same history row in place rather than creating a duplicate,
-// since it's a revision of the same letter, not a new one.
-export function updateLetter(id: number, input: Omit<SaveLetterInput, "clientId">): Promise<Letter> {
-  return request(`/api/letters/${id}`, { method: "PATCH", body: JSON.stringify(input) });
+export interface StageResult {
+  letter: LetterSession;
+  truncated: boolean;
+}
+
+// A stateful chat turn -- the server owns the conversation and appends both
+// the new message and the agent's reply before persisting, so only the new
+// message is ever sent here (contrast the old stateless chatDraftLetter,
+// which resent the whole history every turn).
+export function sendAnalysisMessage(id: number, message: string): Promise<StageResult> {
+  return request(`/api/letters/${id}/analysis`, { method: "POST", body: JSON.stringify({ message }) });
+}
+
+// The explicit Analysis -> Composition handoff: turns the analyst
+// conversation into a structured Analysis Summary and transitions the
+// session to the composition stage.
+export function summarizeAnalysis(id: number): Promise<StageResult> {
+  return request(`/api/letters/${id}/analysis/summarize`, { method: "POST" });
+}
+
+export function sendCompositionMessage(id: number, message: string): Promise<StageResult> {
+  return request(`/api/letters/${id}/composition`, { method: "POST", body: JSON.stringify({ message }) });
+}
+
+// Runs the deterministic personal-data scan plus the advisory legal/
+// compliance review against the current draft, appends a new round to
+// reviewRounds, and moves the session to the review stage.
+export function requestLetterReview(id: number): Promise<StageResult> {
+  return request(`/api/letters/${id}/review`, { method: "POST" });
+}
+
+// Records the user's response to the latest review round and forwards it
+// as the next composition turn, routing the session back to composition --
+// the reviewer's findings are never applied automatically.
+export function sendReviewFeedback(
+  id: number,
+  input: { selectedFlagIndexes: number[]; feedbackText: string },
+): Promise<StageResult> {
+  return request(`/api/letters/${id}/review/feedback`, { method: "POST", body: JSON.stringify(input) });
+}
+
+// Manual back-navigation -- moves the stage pointer only. Nothing is ever
+// deleted: every message array and reviewRounds only ever grow, so going
+// back and having another exchange just adds to the record.
+export function goBackToStage(id: number, stage: "analysis" | "composition"): Promise<StageResult> {
+  return request(`/api/letters/${id}/back`, { method: "POST", body: JSON.stringify({ stage }) });
+}
+
+// Generates the AI-written narrative process summary (per the deliberate
+// choice of a narrative over a structured log) and locks the session as
+// finalized.
+export function finalizeLetter(id: number): Promise<StageResult> {
+  return request(`/api/letters/${id}/finalize`, { method: "POST" });
 }
 
 export function deleteLetter(id: number): Promise<{ ok: boolean }> {
