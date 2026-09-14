@@ -2079,6 +2079,13 @@ a.secondary:hover {
 
 .token-row {
   display: flex;
+  /* The base `label` rule sets flex-direction: column for the standard
+     field-with-label pattern; .token-row is a <label> reused as a
+     horizontal checkbox row (personal-field toggles, review flags), so it
+     must override that explicitly -- same fix .feature-row-toggle already
+     applies for the same reason. Without it, every child (checkbox, dot,
+     text) stacks vertically instead of sitting in a row. */
+  flex-direction: row;
   align-items: center;
   gap: 10px;
   font-size: 13.5px;
